@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""chronos: small command line for the scheduler. Python 3.9+, standard library only.
+
+  chronos env                          shell assignments for the bash scripts
+  chronos due [--dry]                  jobs the tick would start right now (id|date)
+  chronos list                         every job, its schedule and next fire time
+  chronos claim <id> [--unattended]    atomic claim: CLAIMED | ALREADY_DONE | RUNNING_ELSEWHERE | NOT_DUE
+  chronos done <id>                    touch the done-marker and release the claim
+  chronos release <id>                 release a claim without marking done
+  chronos run <id> [--again]           start a job now, headless, in the background
+  chronos prompt <id> [date]           print the exact prompt a headless run would get
+  chronos prompt <id> --event <file> <type>   the prompt of an EVENT run (trusted instructions + the untrusted event block)
+  chronos field <id> <name>            print one job field (used by the run script)
+  chronos jobenv <id>                  shell assignments: per-job model and the event run's tool list (used by the run script)
+  chronos triggers [--dry]             evaluate event triggers; prints id|hash|eventfile|type for each event to fire
+  chronos today                        today's date as Chronos sees it (honours CHRONOS_NOW)
+  chronos claim-event <id> <hash>      atomic claim for one event run: CLAIMED | ALREADY_DONE | RUNNING_ELSEWHERE
+  chronos record --raw ... --id ...    usage meter: turn a stream-json run into its log and a runs.jsonl row (used by the run script)
+  chronos disable-once <id>            switch a finished one-shot job off
+  chronos notice <id> <date> <log> <report> [status]
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib"))
+import chronoslib as C  # noqa: E402
+import chronos_runlog as RL  # noqa: E402
+import chronos_triggers as TR  # noqa: E402
+
+
+def main(argv):
+    if argv and argv[0] in ("-V", "--version", "version"):
+        print("chronos %s" % C.VERSION)
+        return 0
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    cmd, args = argv[0], argv[1:]
+    try:
+        cfg = C.load_config()
+    except RuntimeError as e:
+        sys.stderr.write("chronos: %s\n" % e)
+        return 3
+    if cmd == "env":
+        print(C.shell_env(cfg))
+    elif cmd == "due":
+        try:
+            due = C.due_jobs(cfg)
+        except RuntimeError as e:
+            sys.stderr.write("%s\n" % e)
+            return 3
+        for jid, ds in due:
+            print("%s|%s" % (jid, ds))
+    elif cmd == "list":
+        for j in C.load_jobs(cfg):
+            nf = C.next_fires(j, C.now(), 1) if j.get("enabled") else []
+            print("%-24s %-34s %-9s next: %s" % (j["id"], C.english(j), "on" if j.get("enabled") else "disabled",
+                                                 C.iso(nf[0]) if nf else "-"))
+    elif cmd == "claim" and args:
+        res = C.claim(cfg, args[0], unattended="--unattended" in args)
+        print(res)
+        return 0 if res == "CLAIMED" else 1
+    elif cmd == "done" and args:
+        C.mark_done(cfg, args[0])
+    elif cmd == "release" and args:
+        C.release(cfg, args[0])
+    elif cmd == "run" and args:
+        try:
+            C.start_run(cfg, args[0], again="--again" in args)
+        except C.RunError as e:
+            sys.stderr.write("%s\n" % e.msg)
+            return 1
+        print("started %s" % args[0])
+    elif cmd == "prompt" and len(args) >= 4 and args[1] == "--event":
+        try:
+            sys.stdout.write(C.build_event_prompt(cfg, args[0], args[2], args[3]))
+        except (ValueError, OSError) as e:
+            sys.stderr.write("%s\n" % e)
+            return 1
+    elif cmd == "prompt" and args:
+        sys.stdout.write(C.build_prompt(cfg, args[0], args[1] if len(args) > 1 else None))
+    elif cmd == "jobenv" and args:
+        try:
+            print(C.job_env(cfg, args[0]))
+        except ValueError as e:
+            sys.stderr.write("%s\n" % e)
+            return 1
+    elif cmd == "triggers":
+        return TR.run_tick(cfg, dry="--dry" in args)
+    elif cmd == "today":
+        print(C.day_str(C.now().date()))
+    elif cmd == "claim-event" and len(args) >= 2:
+        res = C.claim_event(cfg, args[0], args[1])
+        print(res)
+        return 0 if res == "CLAIMED" else 1
+    elif cmd == "record":
+        return RL.main(["record"] + args, cfg)
+    elif cmd == "field" and len(args) == 2:
+        job = next((j for j in C.load_jobs(cfg) if j.get("id") == args[0]), {})
+        v = C.job_notify_mode(job) if args[1] == "notify" else job.get(args[1], "")
+        print("" if v is None else v)
+    elif cmd == "disable-once" and args:
+        if C.disable_once(cfg, args[0]):
+            print("one-shot %s disabled in jobs.json" % args[0])
+    elif cmd == "notice" and len(args) >= 4:
+        C.write_notice(cfg, args[0], args[1], args[2], args[3], args[4] if len(args) > 4 else "ok")
+    else:
+        sys.stderr.write(__doc__)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

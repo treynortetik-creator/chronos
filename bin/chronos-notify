@@ -1,0 +1,13 @@
+#!/bin/bash
+# chronos-notify "message"  -  send a message through the configured `notify` command.
+# Silent no-op when no notify command is configured. The command is run as:  <notify> "<message>"
+# with CHRONOS_JOB / CHRONOS_EVENT / CHRONOS_LOG / CHRONOS_REPORT in the environment when known.
+set -u
+DIR="$(cd "$(dirname "$0")" && pwd)"
+PYBIN="$(command -v python3 || echo /usr/bin/python3)"
+ENVOUT="$("$PYBIN" "$DIR/chronos" env)" || exit 0
+eval "$ENVOUT"
+[ -n "${CH_NOTIFY:-}" ] || exit 0
+msg="${1:-}"; [ -n "$msg" ] || exit 0
+export CHRONOS_MESSAGE="$msg"
+/bin/bash -c "$CH_NOTIFY \"\$1\"" chronos-notify "$msg"

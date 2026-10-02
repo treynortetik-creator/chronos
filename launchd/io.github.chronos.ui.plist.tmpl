@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Chronos web UI. Rendered by install.sh. Listens on 127.0.0.1 only. The bash wrapper is deliberate:
+     see "launchd and macOS privacy (TCC)" in the README. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>io.github.chronos.ui</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>exec __PYTHON__ __INSTALL_DIR__/ui/server.py</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CHRONOS_CONFIG</key><string>__CONFIG__</string>
+  </dict>
+  <key>WorkingDirectory</key><string>__INSTALL_DIR__/ui</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>AbandonProcessGroup</key><true/>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>__HOME_DIR__/logs/ui.out</string>
+  <key>StandardErrorPath</key><string>__HOME_DIR__/logs/ui.err</string>
+</dict>
+</plist>

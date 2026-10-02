@@ -1,0 +1,20 @@
+# runtime data (lives in ~/.chronos by default, but never commit it if you point config here)
+state/
+logs/
+history/
+paused-jobs/
+PAUSED
+chronos.beat
+ui-token
+*.lock
+*.tmp.*
+# config can hold notify commands and paths; the template is examples/config.json
+config.json
+!examples/config.json
+notify.env
+*.env
+.env
+# python / macOS
+__pycache__/
+*.pyc
+.DS_Store

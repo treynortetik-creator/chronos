@@ -1,0 +1,67 @@
+[
+  {
+    "id": "daily-summary",
+    "name": "Daily Summary",
+    "description": "Summarizes the last day of git activity across the workspace into a short report.",
+    "time": "08:30",
+    "days": "weekdays",
+    "catchup_min": 180,
+    "enabled": false,
+    "in_session": false,
+    "notify": "always",
+    "once": null,
+    "created": "2026-10-01T00:00:00",
+    "updated": "2026-10-01T00:00:00"
+  },
+  {
+    "id": "weekly-cleanup",
+    "name": "Weekly Cleanup",
+    "description": "Lists stale branches, leftover build output and large untracked files. Reports only, deletes nothing.",
+    "time": "17:00",
+    "days": "fri",
+    "catchup_min": 300,
+    "enabled": false,
+    "in_session": false,
+    "notify": "failure",
+    "once": null,
+    "created": "2026-10-01T00:00:00",
+    "updated": "2026-10-01T00:00:00"
+  },
+  {
+    "id": "remind-me-once",
+    "name": "Reminder (one-shot)",
+    "description": "A one-shot example: runs once at the time below, then switches itself off. Edit the date before enabling.",
+    "time": "15:00",
+    "days": "daily",
+    "catchup_min": 120,
+    "enabled": false,
+    "in_session": false,
+    "notify": "always",
+    "once": "2030-01-01T15:00",
+    "created": "2026-10-01T00:00:00",
+    "updated": "2026-10-01T00:00:00"
+  },
+  {
+    "id": "pdf-digest",
+    "name": "PDF Digest (event)",
+    "description": "Event example: when a new PDF lands in your Downloads folder, Chronos starts a read-only run that summarises it. Edit the folder before enabling.",
+    "time": "09:00",
+    "days": "daily",
+    "catchup_min": 180,
+    "enabled": false,
+    "in_session": false,
+    "notify": "always",
+    "once": null,
+    "clock": false,
+    "triggers": [
+      {
+        "type": "file",
+        "path": "~/Downloads",
+        "glob": "*.pdf"
+      }
+    ],
+    "model": "sonnet",
+    "created": "2026-10-01T00:00:00",
+    "updated": "2026-10-01T00:00:00"
+  }
+]

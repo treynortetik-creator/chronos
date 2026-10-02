@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chronos</title>
+<meta name="chronos-token" content="__TOKEN__">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#07080d">
+<link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;600;700&family=Cormorant+Garamond:ital,wght@0,500;0,600;1,500&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<canvas id="stars" aria-hidden="true"></canvas>
+
+<header class="masthead">
+  <div class="hero" aria-hidden="true"></div>
+  <svg class="orrery" viewBox="-200 -200 400 400" aria-hidden="true">
+    <g class="ring r1"><circle r="190" class="ln"/><circle r="176" class="ln thin"/><g id="ticks1"></g></g>
+    <g class="ring r2"><circle r="140" class="ln"/><circle r="128" class="ln thin dash"/><g id="ticks2"></g><circle cx="140" cy="0" r="5" class="bead"/></g>
+    <g class="ring r3"><circle r="86" class="ln thin"/><circle cx="-86" cy="0" r="3.5" class="bead"/><circle r="4" class="core"/></g>
+  </svg>
+  <div class="mast-inner">
+    <a class="brand" href="#/" aria-label="Chronos dashboard">
+      <img src="/static/icon-512.png" alt="" width="54" height="54">
+      <span class="brand-text">
+        <span class="wordmark">CHRONOS</span>
+        <span class="tagline">Keeper of the schedule</span>
+      </span>
+    </a>
+    <div class="mast-right">
+      <div class="clockbox" title="Local time on this machine">
+        <span class="lbl">Now</span><span id="now-clock" class="mono">--:--</span>
+      </div>
+      <div class="clockbox" id="beat-box" title="Last time the launchd tick ran (every 5 minutes)">
+        <span class="lbl">Tick</span><span id="beat" class="mono">--</span>
+      </div>
+      <button id="pause-all" class="btn ghost" type="button" aria-pressed="false"></button>
+    </div>
+  </div>
+</header>
+<div class="meander" aria-hidden="true"></div>
+
+<nav class="topnav" aria-label="Sections">
+  <a href="#/" data-nav="dash">Dashboard</a>
+  <a href="#/new" data-nav="new">New job</a>
+  <a href="#/logs" data-nav="logs">Logs and reports</a>
+  <a href="#/usage" data-nav="usage">Usage</a>
+  <a href="#/control" data-nav="control">Control room</a>
+</nav>
+
+<main id="app" tabindex="-1"></main>
+<div id="toasts" role="status" aria-live="polite"></div>
+<dialog id="dlg"></dialog>
+
+<script src="/static/icons.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
