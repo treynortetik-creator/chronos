@@ -679,10 +679,48 @@ def event_deny_rules(cfg):
     for f in (".netrc", ".npmrc", ".pypirc", ".git-credentials", ".pgpass"):
         rules.append("Read(/%s)" % os.path.join(home, f))
     rules.append(absolute(os.path.join(home, "Library", "Keychains")))
+    # HOOK FILES AND SETTINGS ARE WRITE-PROTECTED in these runs. The agent's hooks are passed back in (run_settings_json), and a
+    # PreToolUse hook can answer permissionDecision:allow, a PermissionRequest hook can approve a tool: so a job that could
+    # edit .claude/, the hook scripts, .mcp.json or .git/ could plant an approval for tools outside its list. Deny beats allow.
+    for ws in dict.fromkeys([cfg["workspace"], os.path.realpath(cfg["workspace"])]):
+        for rel in [".claude", ".git"] + hook_script_dirs(cfg):
+            for tool in ("Edit",):
+                rules.append("%s(/%s/**)" % (tool, os.path.join(ws, rel)))
+        rules.append("Edit(/%s)" % os.path.join(ws, ".mcp.json"))
     for extra in (validate_allowed_tools(cfg["event_deny"]) or []):
         if extra not in rules:
             rules.append(extra)
     return rules
+
+
+def _read_json_file(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+HOOK_PATH_RE = re.compile(r'\$\{?CLAUDE_PROJECT_DIR\}?/([^\s"\'`;&|<>()$]+)')
+
+
+def hook_script_dirs(cfg):
+    """Folders (relative to the workspace) that the agent's registered hook commands run scripts from, e.g. ["hooks"]. Found by
+    reading `$CLAUDE_PROJECT_DIR/<path>` out of the hook commands in the workspace's .claude/settings.json (and the local file)."""
+    dirs = []
+    for name in ("settings.json", "settings.local.json"):
+        hooks = _read_json_file(os.path.join(cfg["workspace"], ".claude", name)).get("hooks")
+        if not isinstance(hooks, dict):
+            continue
+        for entries in hooks.values():
+            for e in entries if isinstance(entries, list) else []:
+                for h in (e.get("hooks") if isinstance(e, dict) and isinstance(e.get("hooks"), list) else []):
+                    for m in HOOK_PATH_RE.finditer(str(h.get("command", "")) if isinstance(h, dict) else ""):
+                        rel = os.path.dirname(os.path.normpath(m.group(1)))
+                        if rel and not rel.startswith("..") and not os.path.isabs(rel) and rel not in dirs:
+                            dirs.append(rel)
+    return dirs
 
 
 def run_settings_json(cfg):
@@ -695,19 +733,27 @@ def run_settings_json(cfg):
     plugins = [str(p) for p in cfg["disable_plugins"] if str(p).strip()]
     if plugins:
         out["enabledPlugins"] = dict((p, False) for p in plugins)
-    try:
-        with open(os.path.join(cfg["workspace"], ".claude", "settings.json"), encoding="utf-8") as fh:
-            proj = json.load(fh)
-        if isinstance(proj, dict):
-            if isinstance(proj.get("hooks"), dict):
-                out["hooks"] = proj["hooks"]
-            if isinstance(proj.get("autoMemoryEnabled"), bool):
-                out["autoMemoryEnabled"] = proj["autoMemoryEnabled"]
-            deny = (proj.get("permissions") or {}).get("deny") if isinstance(proj.get("permissions"), dict) else None
-            if isinstance(deny, list) and all(isinstance(x, str) for x in deny):
-                out["permissions"] = {"deny": deny}
-    except (OSError, ValueError):
-        pass
+    user = _read_json_file(os.path.join(cfg["claude_home"], "settings.json"))
+    proj = _read_json_file(os.path.join(cfg["workspace"], ".claude", "settings.json"))
+    local = _read_json_file(os.path.join(cfg["workspace"], ".claude", "settings.local.json"))
+    if isinstance(proj.get("hooks"), dict):
+        out["hooks"] = proj["hooks"]
+    if isinstance(proj.get("autoMemoryEnabled"), bool):
+        out["autoMemoryEnabled"] = proj["autoMemoryEnabled"]
+    # permissions.deny from ALL THREE sources (user, project, local): a deny can only narrow, so dropping the user's or the local
+    # file's denies would be a loss of protection, not a gain
+    deny = []
+    for src in (user, proj, local):
+        d = (src.get("permissions") or {}).get("deny") if isinstance(src.get("permissions"), dict) else None
+        for x in (d if isinstance(d, list) else []):
+            if isinstance(x, str) and x.strip() and x not in deny:
+                deny.append(x)
+    if deny:
+        out["permissions"] = {"deny": deny}
+    # the one thing a headless run cannot start without when auth is a key helper rather than the login: taken from the USER's
+    # settings only (never from a file inside the agent folder)
+    if isinstance(user.get("apiKeyHelper"), str) and user["apiKeyHelper"].strip():
+        out["apiKeyHelper"] = user["apiKeyHelper"]
     return json.dumps(out, separators=(",", ":")) if out else ""
 
 

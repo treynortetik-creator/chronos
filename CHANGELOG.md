@@ -26,7 +26,12 @@ runs already used
 - Default deny list adds `~/.config`, `~/.docker`, `~/.kube`, `~/.netrc`, `~/.npmrc`, `~/.pypirc`, `~/.git-credentials`, `~/.pgpass`
   and the Keychains folder.
 
-**Tests** - 122 -> 141
+- Round 2: hook files are write-protected in restricted/event runs (deny `Edit` on `.claude/`, `.git/`, `.mcp.json` and the hook
+  script folders), because a hook can answer "allow"; `permissions.deny` is merged from the user, project and local files; the
+  user's `apiKeyHelper` is passed back. Checked live: a restricted job with broad Edit created a normal file and was refused
+  `hooks/` and `.claude/`; a claude.ai connector tool named in `allowed_tools` loaded and ran in a restricted run.
+
+**Tests** - 122 -> 144
 
 ## 0.2.1 - 2026-10-01
 

@@ -333,9 +333,17 @@ not a lock. Set `"restricted": true` on a job and its scheduled runs are launche
 - `--setting-sources=` (new in the review of 0.2.2): **no user, project or local settings file is read.** Claude Code merges
   saved permissions from `~/.claude/settings.json`, the agent folder's `.claude/settings.json` and `settings.local.json`
   on top of `--allowedTools`, so a `Bash(curl:*)` or whole-MCP-server allow you once clicked "always allow" on would
-  otherwise still apply. What the agent folder's `.claude/settings.json` legitimately contributes is passed back through
-  `--settings`: its `hooks` (the safety guards), `autoMemoryEnabled` and `permissions.deny`. Never an allow, never `env`.
-  Side effect: the folder's `CLAUDE.md` is not auto-loaded in a restricted run (a prompt that needs it must read it)
+  otherwise still apply. What is passed back through `--settings` is exactly: the agent folder's `hooks` (the safety guards),
+  its `autoMemoryEnabled`, `permissions.deny` merged from the user, project and local files (a deny can only narrow), and the
+  user's own `apiKeyHelper` (needed to start at all when auth is a key helper). No allow rule, no `env`, no plugin or MCP
+  setting. **Hooks are code, and a hook can answer "allow"**, so the files that define them are write-protected in these runs:
+  `--disallowedTools` denies `Edit` (which covers Write) on the workspace's `.claude/`, `.git/`, `.mcp.json` and every folder a
+  hook command runs a script from (found by reading `$CLAUDE_PROJECT_DIR/<path>` out of the hook commands, e.g. Talos's
+  `hooks/`). A job you give broad Edit on the workspace therefore still cannot rewrite a hook or plant an approval
+- Side effects of reading no settings file: the folder's `CLAUDE.md` is not auto-loaded (a prompt that needs it must read it);
+  a user-level `enabledPlugins` entry (and any MCP server a plugin brings) and a project `.mcp.json` server that needed approval
+  in a settings file do not load. MCP servers that come from your account (claude.ai connectors) did load in a restricted run
+  with their tool named in `allowed_tools` (checked 2026-10-07); a failing job is the safe outcome, and the report says why
 - never `--dangerously-skip-permissions`, and none of `claude_args`
 - the same `--setting-sources=` rule applies to **event runs**
 
@@ -442,7 +450,7 @@ loopback-only bind, the webhook secret and throttle, and that no event run ever 
 tests/run.sh
 ```
 
-141 tests, about a minute. They cover the tick's due logic with a fake clock (grace, catch-up, days,
+144 tests, about a minute. They cover the tick's due logic with a fake clock (grace, catch-up, days,
 markers, pause, one-shots, a broken `jobs.json`), concurrent claims, the run script against a fake
 `claude` (success, failure, watchdog, one-shot disabling, the plugin-disable flags), the hook, the UI's auth
 and path rules, and for 0.2.0: every trigger type (baselines, settling, rate limit, missing Gmail/`gh`

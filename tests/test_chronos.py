@@ -2204,6 +2204,57 @@ class RestrictedClockRuns(unittest.TestCase):
         for frag in (".config", ".netrc", ".docker", ".npmrc", ".kube", ".ssh", ".aws", ".git-credentials"):
             self.assertIn(os.path.join(home, frag), deny, frag)
 
+    # ---- round 2 review
+    def test_hook_files_and_settings_are_write_protected_in_restricted_runs(self):
+        self.start()
+        d = os.path.join(self.e.cfg["workspace"], ".claude")
+        os.makedirs(d, exist_ok=True)
+        json.dump({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command",
+                   "command": "f=\"$CLAUDE_PROJECT_DIR/guards/pre.py\"; python3 \"$f\""}]}],
+                   "Stop": [{"hooks": [{"type": "command", "command": "python3 ${CLAUDE_PROJECT_DIR}/hooks/stop.py"}]}]}}, open(os.path.join(d, "settings.json"), "w"))
+        self.assertEqual(sorted(C.hook_script_dirs(self.e.cfg)), ["guards", "hooks"])
+        deny = C.event_deny_rules(self.e.cfg)
+        ws = self.e.cfg["workspace"]
+        for rel in (".claude/**", ".git/**", "guards/**", "hooks/**"):
+            self.assertIn("Edit(/%s)" % os.path.join(ws, rel), deny, rel)
+        self.assertIn("Edit(/%s)" % os.path.join(ws, ".mcp.json"), deny)
+        self.tick()
+        self.settle()
+        log = self.fake()
+        self.assertIn("Edit(/%s/.claude/**)" % ws, log)                        # it reaches the CLI as --disallowedTools
+        self.assertIn("Edit(/%s/hooks/**)" % ws, log)
+
+    def test_event_runs_get_the_same_write_protection(self):
+        self.e = Env([], notify=False)
+        self.write_agent_settings()
+        self.assertIn("Edit(/%s/.claude/**)" % self.e.cfg["workspace"], C.event_deny_rules(self.e.cfg))   # one list serves both run kinds
+
+    def test_denies_from_user_project_and_local_settings_are_all_passed_back_and_allows_never(self):
+        self.start()
+        ws = self.e.cfg["workspace"]
+        os.makedirs(os.path.join(ws, ".claude"), exist_ok=True)
+        os.makedirs(self.e.cfg["claude_home"], exist_ok=True)
+        json.dump({"permissions": {"deny": ["Read(//USER-DENY/**)", "Bash(rm:*)"], "allow": ["Bash(user-allow:*)"]}, "apiKeyHelper": "/bin/user-helper",
+                   "enabledPlugins": {"x@y": True}, "env": {"U": "1"}}, open(os.path.join(self.e.cfg["claude_home"], "settings.json"), "w"))
+        json.dump({"permissions": {"deny": ["Read(//PROJECT-DENY/**)", "Bash(rm:*)"], "allow": ["Bash(project-allow:*)"]}, "apiKeyHelper": "/bin/project-helper",
+                   "hooks": {}}, open(os.path.join(ws, ".claude", "settings.json"), "w"))
+        json.dump({"permissions": {"deny": ["Read(//LOCAL-DENY/**)"], "allow": ["Bash(git push:*)"]}}, open(os.path.join(ws, ".claude", "settings.local.json"), "w"))
+        js = json.loads(C.run_settings_json(self.e.cfg))
+        self.assertEqual(js["permissions"]["deny"], ["Read(//USER-DENY/**)", "Bash(rm:*)", "Read(//PROJECT-DENY/**)", "Read(//LOCAL-DENY/**)"])   # merged, de-duplicated
+        self.assertNotIn("allow", js["permissions"])
+        self.assertEqual(js["apiKeyHelper"], "/bin/user-helper")                # from the USER's file only, never the agent folder's
+        self.assertNotIn("env", js)
+        self.assertNotIn("x@y", json.dumps(js))
+        self.assertNotIn("user-allow", json.dumps(js))
+        self.assertNotIn("project-allow", json.dumps(js))
+        self.assertNotIn("git push", json.dumps(js))
+        self.tick()
+        self.settle()
+        log = self.fake()
+        for d in ("USER-DENY", "PROJECT-DENY", "LOCAL-DENY"):
+            self.assertIn(d, log)
+        self.assertNotIn("project-helper", log)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2, warnings="ignore")
