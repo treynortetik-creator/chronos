@@ -84,7 +84,7 @@ fi
 MODE="$("$PYBIN" "$DIR/chronos" field "$id" notify)"
 # per-job settings: CH_JOB_MODEL and, for events, CH_EV_ALLOWED / CH_EV_TOOLS / CH_EV_DENY / CH_EV_MCP.
 # A job that cannot be read is a failure; nothing falls back to a wider tool list.
-CH_JOB_MODEL=""; CH_RESTRICTED=0
+CH_JOB_MODEL=""; CH_RESTRICTED=0; CH_RSETTINGS=""
 if [ "$KIND" != command ]; then
   JOBENV="$("$PYBIN" "$DIR/chronos" jobenv "$id")" || fail_early "cannot read the job's settings"
   eval "$JOBENV"
@@ -95,7 +95,10 @@ RESTRICTED=""
 if [ "$KIND" = command ]; then
   args=()
 elif [ -n "$EVENT" ] || [ -n "$RESTRICTED" ]; then
-  args=(-p --permission-mode=default "--allowedTools=$CH_EV_ALLOWED" "--tools=$CH_EV_TOOLS")
+  # --setting-sources= : read NO user/project/local settings file. A saved `Bash(curl:*)` (or a whole-MCP-server allow) in
+  # ~/.claude/settings.json or the agent's settings.local.json would otherwise be MERGED on top of --allowedTools. The agent's
+  # hooks and deny rules come back in through --settings (CH_RSETTINGS, built by chronos_run_settings).
+  args=(-p --permission-mode=default --setting-sources= "--allowedTools=$CH_EV_ALLOWED" "--tools=$CH_EV_TOOLS")
   [ -n "$CH_EV_DENY" ] && args+=("--disallowedTools=$CH_EV_DENY")
   [ "$CH_EV_MCP" = "open" ] || args+=(--strict-mcp-config)
 else
@@ -103,7 +106,11 @@ else
   [ ${#CH_CLAUDE_ARGS[@]} -gt 0 ] && args+=("${CH_CLAUDE_ARGS[@]}")
 fi
 if [ "$KIND" != command ]; then
-  [ -n "$CH_SETTINGS" ] && args+=(--settings "$CH_SETTINGS")
+  if [ -n "$EVENT" ] || [ -n "$RESTRICTED" ]; then
+    [ -n "$CH_RSETTINGS" ] && args+=(--settings "$CH_RSETTINGS")
+  else
+    [ -n "$CH_SETTINGS" ] && args+=(--settings "$CH_SETTINGS")
+  fi
   [ -n "$CH_JOB_MODEL" ] && args+=("--model=$CH_JOB_MODEL")
   args+=(--output-format=stream-json --verbose)
 fi
@@ -137,7 +144,7 @@ if [ -n "$EVENT" ]; then
   # report from the final message; the job itself writes no markers (an event run must not suppress the clock run).
   OKREC="$(record event)" || OKREC=""
   rm -f "$RAW" "$ERRF"
-  if [ "$rc" -eq 0 ] && [ -z "$timed_out" ] && [ "$OKREC" != "fail" ]; then
+  if [ "$rc" -eq 0 ] && [ -z "$timed_out" ] && [ "$OKREC" = "ok" ]; then
     echo "$(date '+%F %T') OK $id event $EHASH rc=$rc"
     touch "$RAN"; cp "$LOG" "$REPORT" 2>/dev/null
     if [ "$MODE" = "always" ]; then
@@ -157,7 +164,8 @@ if [ -n "$RESTRICTED" ]; then
   # restricted run: the job has no way to write a marker or a report. Success = a clean exit inside the watchdog with no
   # error result (require_marker cannot apply: nothing but Chronos may write the marker). Chronos writes the report.
   OKREC="$(record schedule)" || OKREC=""
-  if [ ! -f "$RAN" ] && [ "$rc" -eq 0 ] && [ -z "$timed_out" ] && [ "$OKREC" != "fail" ]; then touch "$RAN"; cp "$LOG" "$REPORT" 2>/dev/null; fi
+  # (OKREC must be exactly "ok": a record step that crashed prints nothing, and "nothing" is not success)
+  if [ ! -f "$RAN" ] && [ "$rc" -eq 0 ] && [ -z "$timed_out" ] && [ "$OKREC" = "ok" ]; then touch "$RAN"; cp "$LOG" "$REPORT" 2>/dev/null; fi
 else
   if [ ! -f "$RAN" ] && { [ -z "$CH_REQUIRE_MARKER" ] || [ "$KIND" = command ]; } && [ "$rc" -eq 0 ] && [ -z "$timed_out" ]; then touch "$RAN"; fi
   record schedule >/dev/null || true

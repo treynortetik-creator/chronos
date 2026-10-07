@@ -14,8 +14,19 @@ runs already used
 - the run prompt states the tool list and tells the job it is restricted; the Control Room shows a "Restricted: schedule" chip
 - refused together with `in_session: true` (a live session's permissions cannot be narrowed) and on command jobs
 - `bin/chronos jobenv` reports `CH_RESTRICTED`; `chronos record` takes `--restricted`
+- **Saved permissions no longer leak in.** Restricted and event runs start with `--setting-sources=` so `~/.claude/settings.json`,
+  the agent's `settings.json` and `settings.local.json` (where "always allow" clicks are saved) are not merged on top of the
+  job's tool list. The agent folder's hooks, `autoMemoryEnabled` and `permissions.deny` are passed back via `--settings`.
+  Checked live: a `Bash(curl:*)` allow planted in `settings.local.json` let an unrestricted-by-settings run execute curl, and a
+  restricted run refused it. Side effect: `CLAUDE.md` is not auto-loaded in such a run.
+- A malformed `restricted` (`"true"`, `1`, `null`) is invalid everywhere (tick, Run now, `jobenv`, the run script) and never runs
+  unrestricted.
+- A restricted run where every tool call was refused, or whose usage record could not be written, is a failure, not a done job;
+  refusals are appended to the report.
+- Default deny list adds `~/.config`, `~/.docker`, `~/.kube`, `~/.netrc`, `~/.npmrc`, `~/.pypirc`, `~/.git-credentials`, `~/.pgpass`
+  and the Keychains folder.
 
-**Tests** - 122 -> 134
+**Tests** - 122 -> 141
 
 ## 0.2.1 - 2026-10-01
 

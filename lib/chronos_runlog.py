@@ -34,7 +34,7 @@ def _iso(ts):
 
 def parse_stream(path):
     """-> dict(result, text, init_model, rate, lines, parsed). Tolerates junk lines and truncated output."""
-    out = {"result": None, "text": "", "init_model": None, "rate": None, "lines": 0, "parsed": 0, "last_assistant": ""}
+    out = {"result": None, "text": "", "init_model": None, "rate": None, "lines": 0, "parsed": 0, "last_assistant": "", "tool_uses": 0}
     try:
         fh = open(path, encoding="utf-8", errors="replace")
     except OSError:
@@ -61,6 +61,10 @@ def parse_stream(path):
                 out["rate"] = d["rate_limit_info"]
             elif t == "assistant":
                 try:
+                    out["tool_uses"] += sum(1 for c in (d.get("message") or {}).get("content") or [] if isinstance(c, dict) and c.get("type") == "tool_use")
+                except Exception:
+                    pass
+                try:
                     texts = [c.get("text", "") for c in (d.get("message") or {}).get("content") or [] if isinstance(c, dict) and c.get("type") == "text"]
                     if any(texts):
                         out["last_assistant"] = "\n".join(x for x in texts if x)
@@ -70,7 +74,7 @@ def parse_stream(path):
 
 
 def empty_stream():
-    return {"result": None, "text": "", "init_model": None, "rate": None, "lines": 0, "parsed": 0, "last_assistant": ""}
+    return {"result": None, "text": "", "init_model": None, "rate": None, "lines": 0, "parsed": 0, "last_assistant": "", "tool_uses": 0}
 
 
 def build_row(a, ps):
@@ -104,12 +108,26 @@ def build_row(a, ps):
     }
 
 
+def denial_count(ps):
+    return len((ps["result"] or {}).get("permission_denials") or [])
+
+
+def all_denied(ps):
+    """True when the run tried tools and the permission system refused every attempt: a restricted job that could do none of
+    its work. Counted from the stream (tool_use blocks) against the result's permission_denials."""
+    d = denial_count(ps)
+    return d > 0 and ps["tool_uses"] > 0 and d >= ps["tool_uses"]
+
+
 def write_log(a, ps, raw_text):
     res = ps["result"]
     if res is not None:
         body = str(res.get("result") or "")
         if res.get("is_error"):
             body = "[claude reported an error: %s]\n%s" % (res.get("subtype") or "error", body)
+        if (a.kind == "event" or getattr(a, "restricted", 0)) and denial_count(ps):
+            body = body.rstrip("\n") + "\n\n[chronos: the permission system refused %d tool call(s) in this run%s]" % (
+                denial_count(ps), "; EVERY tool call was refused, so the job did none of its work" if all_denied(ps) else "")
     elif ps["parsed"]:
         body = (ps["last_assistant"] + "\n" if ps["last_assistant"] else "") + "[no final result: the run ended early (killed or crashed); partial output above]"
     else:
@@ -158,6 +176,8 @@ def record(cfg, a):
         ok = (a.rc == 0 and not a.timed_out and ps["result"] is not None and not ps["result"].get("is_error"))
         if ps["result"] is None and ps["parsed"] == 0 and a.rc == 0 and not a.timed_out:
             ok = True            # claude printed plain text (older CLI, or a stub): a clean exit is still a success
+        if ok and all_denied(ps):
+            ok = False           # every tool call was refused: the run "finished" but did nothing; a failure, not a done job
     else:
         ok = bool(a.marker_path) and os.path.exists(a.marker_path)
     row["ok"] = bool(ok)

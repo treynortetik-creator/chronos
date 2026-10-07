@@ -326,12 +326,24 @@ not a lock. Set `"restricted": true` on a job and its scheduled runs are launche
 - `--permission-mode=default`, so anything outside the allow list is **denied** (nobody is there to approve it)
 - `--allowedTools` = the job's `allowed_tools`, or, when it has none, `Read`, `Grep`, `Glob` plus the notify sender
 - `--tools` limited to the built-ins that list names, `--strict-mcp-config` unless the list names an `mcp__` tool
-- `--disallowedTools` for `.env` files, `~/.ssh`, `~/.aws`, `~/.gnupg`, Chronos's own folders and Claude's credentials
+- `--disallowedTools` for `.env` files, `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config` (gh, gcloud and most CLI tokens),
+  `~/.docker`, `~/.kube`, `~/.netrc`, `~/.npmrc`, `~/.pypirc`, `~/.git-credentials`, `~/.pgpass`, the Keychains folder,
+  Chronos's own folders and Claude's credentials. This list is best effort: a deny list cannot be complete, and the real
+  boundary is a **folder-scoped** `Read(//path/**)` (with `Grep` and `Glob` scoped the same way), which is what Talos ships
+- `--setting-sources=` (new in the review of 0.2.2): **no user, project or local settings file is read.** Claude Code merges
+  saved permissions from `~/.claude/settings.json`, the agent folder's `.claude/settings.json` and `settings.local.json`
+  on top of `--allowedTools`, so a `Bash(curl:*)` or whole-MCP-server allow you once clicked "always allow" on would
+  otherwise still apply. What the agent folder's `.claude/settings.json` legitimately contributes is passed back through
+  `--settings`: its `hooks` (the safety guards), `autoMemoryEnabled` and `permissions.deny`. Never an allow, never `env`.
+  Side effect: the folder's `CLAUDE.md` is not auto-loaded in a restricted run (a prompt that needs it must read it)
 - never `--dangerously-skip-permissions`, and none of `claude_args`
+- the same `--setting-sources=` rule applies to **event runs**
 
 A restricted run cannot write its own report or done-marker (it has no Write tool unless you allow one), so
 **Chronos writes them** from the final message, exactly as it does for an event run. Success means a clean exit
-inside the watchdog with no error result; `require_marker` does not apply to a restricted job.
+inside the watchdog with no error result; `require_marker` does not apply to a restricted job. A run in which the
+permission system refused **every** tool call it made is a failure (nothing was done), and refusals are always noted at
+the end of the report.
 
 ```json
 {"id": "weekly-lint", "name": "Weekly lint", "time": "08:17", "days": "mon", "restricted": true,
@@ -349,6 +361,8 @@ Rules worth knowing (checked against Claude Code 2.1.x, 2026-10-07):
   `date`). That is read access inside the working directory, not write access.
 - A job with `"restricted": true` cannot also be `in_session`: a live session runs with the session's own
   permissions, which Chronos cannot narrow. The pair is refused.
+- `restricted` must be `true` or `false`. Anything else (`"true"`, `1`, `null`) is invalid: the tick skips the job, Run now
+  refuses it, and `chronos-run.sh` fails the run before starting `claude`. It is never read as "unrestricted".
 - It does not apply to command jobs (they run one fixed shell command and have no tools).
 - `"restricted": false`, or leaving the field out, keeps the old behaviour: that is the opt-out.
 
@@ -428,7 +442,7 @@ loopback-only bind, the webhook secret and throttle, and that no event run ever 
 tests/run.sh
 ```
 
-134 tests, about a minute. They cover the tick's due logic with a fake clock (grace, catch-up, days,
+141 tests, about a minute. They cover the tick's due logic with a fake clock (grace, catch-up, days,
 markers, pause, one-shots, a broken `jobs.json`), concurrent claims, the run script against a fake
 `claude` (success, failure, watchdog, one-shot disabling, the plugin-disable flags), the hook, the UI's auth
 and path rules, and for 0.2.0: every trigger type (baselines, settling, rate limit, missing Gmail/`gh`

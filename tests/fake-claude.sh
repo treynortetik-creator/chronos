@@ -1,6 +1,6 @@
 #!/bin/bash
 # A stand-in for the `claude` CLI, used only by the tests. Records how it was called, then behaves
-# according to $FAKE_MODE: ok (default) | fail | hang | nomarker | iserror
+# according to $FAKE_MODE: ok (default) | fail | hang | nomarker | iserror | alldenied | somedenied
 # With FAKE_STREAM=1 it prints what `claude -p --output-format=stream-json --verbose` prints (system init,
 # assistant text, a rate_limit_event, a result with usage and cost) instead of plain text.
 LOGF="${FAKE_LOG:-/dev/null}"
@@ -20,7 +20,18 @@ say() {  # say <text> [is_error true|false]
   fi
 }
 
+denied_stream() {  # denied_stream <tool_uses> <denials>: a stream whose tool calls were (partly) refused by the permission system
+  echo '{"type":"system","subtype":"init","model":"claude-fake-1"}'
+  local i
+  for i in $(seq 1 "$1"); do echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t'$i'","name":"Bash","input":{"command":"x"}}]}}'; done
+  local d="" j
+  for j in $(seq 1 "$2"); do d="$d{\"tool_name\":\"Bash\"},"; done
+  echo '{"type":"result","subtype":"success","is_error":false,"result":"I could not run anything","total_cost_usd":0.01,"num_turns":3,"usage":{"input_tokens":1,"output_tokens":1},"permission_denials":['"${d%,}"'],"session_id":"abc"}'
+}
+
 case "${FAKE_MODE:-ok}" in
+  alldenied) denied_stream 2 2; exit 0 ;;
+  somedenied) denied_stream 3 1; exit 0 ;;
   hang) exec sleep 120 ;;
   fail) echo "simulated failure"; exit 1 ;;
   iserror) say "the model reported an error" true; exit 0 ;;

@@ -187,8 +187,7 @@ def validate_job_record(j):
         raise ValueError("triggers must be a list")
     if j.get("kind") not in (None,) + JOB_KINDS:
         raise ValueError("kind must be one of %s" % ", ".join(JOB_KINDS))
-    if j.get("restricted") not in (None, True, False):
-        raise ValueError("restricted must be true or false")
+    check_restricted_field(j)
     if j.get("restricted") is True and j.get("in_session") is True:
         raise ValueError("a restricted job cannot also run in a live session (that run would use the session's permissions, not the restricted list)")
     if j.get("restricted") is True and j.get("kind") == "command":
@@ -204,6 +203,14 @@ def validate_job_record(j):
         if j.get("in_session") is True:
             raise ValueError("a command job cannot run in a live session (in_session must be false)")
     return j
+
+
+def check_restricted_field(job):
+    """A job's `restricted` must be absent or a real boolean. Raises ValueError otherwise.
+    1 == True in Python, and "true" is a truthy string: neither may be read as "not restricted". A malformed value is
+    INVALID (the run is refused), never quietly the unrestricted default."""
+    if isinstance(job, dict) and "restricted" in job and not isinstance(job["restricted"], bool):
+        raise ValueError("restricted must be true or false (got %r); the job will not run until it is fixed" % (job["restricted"],))
 
 
 def is_command(job):
@@ -665,10 +672,43 @@ def event_deny_rules(cfg):
     rules = ["Read(**/.env)", "Read(**/.env.*)", absolute(os.path.join(home, ".ssh")), absolute(os.path.join(home, ".aws")),
              absolute(os.path.join(home, ".gnupg")), absolute(cfg["home_dir"]), absolute(os.path.dirname(cfg["config_path"])),
              "Read(/%s)" % os.path.join(cfg["claude_home"], ".credentials.json"), "Read(/%s)" % os.path.join(home, ".claude.json")]
+    # more well-known credential stores (best effort: a deny list can never be complete; a folder-scoped Read allow, as
+    # Talos uses, is the real boundary). ~/.config as a whole covers gh, gcloud, Talos's notify.env and most CLI tokens.
+    for d in (".config", ".docker", ".kube"):
+        rules.append(absolute(os.path.join(home, d)))
+    for f in (".netrc", ".npmrc", ".pypirc", ".git-credentials", ".pgpass"):
+        rules.append("Read(/%s)" % os.path.join(home, f))
+    rules.append(absolute(os.path.join(home, "Library", "Keychains")))
     for extra in (validate_allowed_tools(cfg["event_deny"]) or []):
         if extra not in rules:
             rules.append(extra)
     return rules
+
+
+def run_settings_json(cfg):
+    """The --settings JSON for a RESTRICTED or EVENT run. Those runs start with `--setting-sources=` (no user, project or
+    local settings file is read), because a saved `Bash(curl:*)` or whole-MCP-server allow in ~/.claude/settings.json or
+    the agent's settings.local.json would otherwise be merged on top of the job's tool list. What the agent folder's
+    .claude/settings.json legitimately contributes is passed back in here: its hooks (the safety guards), its
+    autoMemoryEnabled, and its permissions.deny (a deny can only narrow). Nothing else from that file, and never an allow."""
+    out = {}
+    plugins = [str(p) for p in cfg["disable_plugins"] if str(p).strip()]
+    if plugins:
+        out["enabledPlugins"] = dict((p, False) for p in plugins)
+    try:
+        with open(os.path.join(cfg["workspace"], ".claude", "settings.json"), encoding="utf-8") as fh:
+            proj = json.load(fh)
+        if isinstance(proj, dict):
+            if isinstance(proj.get("hooks"), dict):
+                out["hooks"] = proj["hooks"]
+            if isinstance(proj.get("autoMemoryEnabled"), bool):
+                out["autoMemoryEnabled"] = proj["autoMemoryEnabled"]
+            deny = (proj.get("permissions") or {}).get("deny") if isinstance(proj.get("permissions"), dict) else None
+            if isinstance(deny, list) and all(isinstance(x, str) for x in deny):
+                out["permissions"] = {"deny": deny}
+    except (OSError, ValueError):
+        pass
+    return json.dumps(out, separators=(",", ":")) if out else ""
 
 
 def job_model(cfg, job):
@@ -702,10 +742,14 @@ def job_env(cfg, jid):
     job = next((j for j in load_jobs(cfg) if isinstance(j, dict) and j.get("id") == jid), None)
     if job is None:
         raise ValueError("no such job")
+    check_restricted_field(job)                  # a malformed value is refused, never read as "unrestricted" (ValueError -> the run fails early)
+    if job.get("restricted") is True and job.get("in_session") is True:
+        raise ValueError("a restricted job cannot also run in a live session")
     st = event_settings(cfg, job)
     q = shlex.quote
     return "\n".join([
         "CH_RESTRICTED=%s" % ("1" if is_restricted(job) else "0"),
+        "CH_RSETTINGS=%s" % q(run_settings_json(cfg)),
         "CH_JOB_MODEL=%s" % q(st["model"]),
         "CH_EV_ALLOWED=%s" % q(",".join(st["allowed"])),
         "CH_EV_TOOLS=%s" % q(",".join(st["builtin"])),
@@ -885,6 +929,12 @@ def start_run(cfg, jid, again=False):
         raise RunError(404, "no such job")
     if not is_command(job) and not os.path.isfile(prompt_file(cfg, jid)):
         raise RunError(409, "this job has no prompt.md, so there is nothing to run")
+    try:
+        check_restricted_field(job)
+        if job.get("restricted") is True and job.get("in_session") is True:
+            raise ValueError("a restricted job cannot also run in a live session")
+    except ValueError as e:
+        raise RunError(409, str(e))
     run_script = os.path.join(ROOT_DIR, "bin", "chronos-run.sh")
     ds = date_key(job, now())
     ran = ran_path(cfg, jid, ds)

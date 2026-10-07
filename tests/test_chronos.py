@@ -2112,6 +2112,98 @@ class RestrictedClockRuns(unittest.TestCase):
         self.assertIn("CH_RESTRICTED=1", C.job_env(self.e.cfg, "rj"))
         self.assertIn("CH_RESTRICTED=0", C.job_env(self.e.cfg, "plain"))
 
+    # ---- 0.2.2 review fixes
+    def write_agent_settings(self, allow=True):
+        d = os.path.join(self.e.cfg["workspace"], ".claude")
+        os.makedirs(d, exist_ok=True)
+        st = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "echo GUARD-HOOK-MARK"}]}]},
+              "autoMemoryEnabled": False, "permissions": {"deny": ["Read(./.env)"]}, "env": {"SECRET_ENV": "x"}}
+        if allow:
+            st["permissions"]["allow"] = ["Bash(curl:*)", "mcp__everything"]
+        json.dump(st, open(os.path.join(d, "settings.json"), "w"))
+        json.dump({"permissions": {"allow": ["Bash(git push:*)"]}}, open(os.path.join(d, "settings.local.json"), "w"))
+
+    def test_restricted_run_reads_no_settings_file_and_gets_only_hooks_and_denies_back(self):
+        self.start()
+        self.write_agent_settings()
+        self.tick()
+        self.settle()
+        log = self.fake()
+        self.assertIn("--setting-sources= ", log)                             # user, project and local settings files are NOT read
+        self.assertIn("--settings ", log)
+        self.assertIn("GUARD-HOOK-MARK", log)                                 # the agent's own hooks come back in
+        self.assertIn('"autoMemoryEnabled":false', log)
+        self.assertIn('"permissions":{"deny":["Read(./.env)"]}', log)         # a deny can only narrow
+        self.assertNotIn("Bash(curl:*)", log)                                 # a saved allow is never passed on
+        self.assertNotIn("mcp__everything", log)
+        self.assertNotIn("SECRET_ENV", log)                                   # nor the project's env block
+        self.assertNotIn("git push", log)
+
+    def test_event_runs_also_ignore_saved_settings(self):
+        self.e = Env([], notify=False)
+        self.st = self.e.cfg["state_dir"]
+        self.write_agent_settings()
+        watch = os.path.join(self.e.tmp, "watch")
+        os.makedirs(watch)
+        self.e.set_jobs([event_job("ev", [{"type": "file", "path": watch, "glob": "*.txt"}])])
+        self.e.run(["/bin/bash", TICK])
+        make_old(os.path.join(watch, "a.txt"), "payload")
+        self.e.run(["/bin/bash", TICK])
+        self.assertTrue(self.e.wait_for(lambda: os.path.exists(self.e.fake_log) and "--setting-sources=" in self.fake()))
+        self.assertIn("GUARD-HOOK-MARK", self.fake())
+        self.assertNotIn("Bash(curl:*)", self.fake())
+
+    def test_an_unrestricted_run_keeps_reading_settings_as_before(self):
+        self.start([job("plain")])
+        self.write_agent_settings()
+        self.tick()
+        self.settle("plain")
+        self.assertNotIn("--setting-sources", self.fake())
+        self.assertIn("--dangerously-skip-permissions", self.fake())
+
+    def test_malformed_restricted_is_refused_everywhere_never_run_unrestricted(self):
+        for bad in ("true", 1, "yes", None, [], 0):
+            j = job("rj", restricted=bad)
+            self.start([j])
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                C.validate_job_record(j)
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                C.job_env(self.e.cfg, "rj")                                   # chronos-run.sh then fails early: "cannot read the job's settings"
+            with self.assertRaises(C.RunError, msg=repr(bad)):
+                C.start_run(self.e.cfg, "rj")                                 # Run now (UI / `chronos run`)
+            r = self.e.run(["/bin/bash", RUN, "rj", self.D])                  # the script itself, as a manual run would call it
+            self.assertFalse(os.path.exists(self.e.fake_log), "claude was started for restricted=%r" % (bad,))
+            self.assertTrue(os.path.exists(os.path.join(self.st, "failed-rj-" + self.D)), repr(bad))
+            self.assertFalse(os.path.exists(os.path.join(self.st, "ran-rj-" + self.D)))
+            self.e.cleanup()
+            self.e = None
+
+    def test_a_restricted_run_where_every_tool_call_was_refused_is_a_failure(self):
+        self.start()
+        self.tick(FAKE_MODE="alldenied", FAKE_STREAM="1")
+        self.settle()
+        self.assertTrue(os.path.exists(os.path.join(self.st, "failed-rj-" + self.D)))
+        self.assertFalse(os.path.exists(os.path.join(self.st, "ran-rj-" + self.D)))
+        self.assertTrue(self.e.wait_for(lambda: os.path.exists(self.e.notify_file)))
+        log = open(os.path.join(self.e.cfg["logs_dir"], [n for n in os.listdir(self.e.cfg["logs_dir"]) if n.startswith("rj-") and n.endswith(".log")][0])).read()
+        self.assertIn("EVERY tool call was refused", log)
+
+    def test_some_refusals_still_finish_but_are_written_into_the_report(self):
+        self.start()
+        self.tick(FAKE_MODE="somedenied", FAKE_STREAM="1")
+        self.settle()
+        self.assertTrue(os.path.exists(os.path.join(self.st, "ran-rj-" + self.D)))
+        rep = open(os.path.join(self.st, "reports", "rj-%s.md" % self.D)).read()
+        self.assertIn("refused 1 tool call(s)", rep)
+        self.assertNotIn("EVERY", rep)
+
+    def test_default_deny_list_covers_the_common_credential_stores(self):
+        self.start()
+        deny = ",".join(C.event_deny_rules(self.e.cfg))
+        home = os.path.expanduser("~")
+        for frag in (".config", ".netrc", ".docker", ".npmrc", ".kube", ".ssh", ".aws", ".git-credentials"):
+            self.assertIn(os.path.join(home, frag), deny, frag)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2, warnings="ignore")
