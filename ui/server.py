@@ -330,6 +330,7 @@ def describe_job(job, detail=False):
     out["triggers"] = job.get("triggers") or []
     out["trust"] = {"schedule": C.clock_on(job), "event": bool(out["triggers"])}
     out["model"] = job.get("model") or None
+    out["restricted"] = C.is_restricted(job)
     out["allowed_tools"] = job.get("allowed_tools") or None
     out["default_allowed_tools"] = C.default_allowed_tools(CFG)
     out["rate_per_hour"] = CFG["event_rate_per_hour"]

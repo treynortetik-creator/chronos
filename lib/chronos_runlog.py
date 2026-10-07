@@ -154,7 +154,7 @@ def record(cfg, a):
         raw_text = ""
     ps = empty_stream() if getattr(a, "command", 0) else parse_stream(a.raw)   # a command's output is never a Claude stream
     row = build_row(a, ps)
-    if a.kind == "event":
+    if a.kind == "event" or getattr(a, "restricted", 0):
         ok = (a.rc == 0 and not a.timed_out and ps["result"] is not None and not ps["result"].get("is_error"))
         if ps["result"] is None and ps["parsed"] == 0 and a.rc == 0 and not a.timed_out:
             ok = True            # claude printed plain text (older CLI, or a stub): a clean exit is still a success
@@ -255,6 +255,7 @@ def add_record_arguments(sub):
     r.add_argument("--thash", default="")
     r.add_argument("--marker-path", dest="marker_path", default="")
     r.add_argument("--command", type=int, default=0)         # 1 = a command job (plain output, no usage)
+    r.add_argument("--restricted", type=int, default=0)      # 1 = a restricted clock run: judged like an event run (clean exit, no error result)
     return r
 
 

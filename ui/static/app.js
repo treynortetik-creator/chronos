@@ -478,7 +478,8 @@
   function trustChips(j) {
     var c = [];
     if (j.kind === "command") return [h("span", { class: "chip", title: "Runs a plain shell command: no Claude, no tokens.", text: "Plain command" })];
-    if (j.trust && j.trust.schedule) c.push(h("span", { class: "chip ok", title: "Clock-schedule runs follow your own instructions and run with full permissions.", text: "Trusted: schedule" }));
+    if (j.restricted) c.push(h("span", { class: "chip ok", title: "Scheduled runs get only this job's allowed tools (--permission-mode=default); they never skip permissions.", text: "Restricted: schedule" }));
+    else if (j.trust && j.trust.schedule) c.push(h("span", { class: "chip ok", title: "Clock-schedule runs follow your own instructions and run with full permissions.", text: "Trusted: schedule" }));
     if (j.trust && j.trust.event) c.push(h("span", { class: "chip warn", title: "Event runs read text from outside (email, pull requests, files, webhooks). They get a narrow tool list and never skip permissions.", text: "Untrusted: event" }));
     if (j.model) c.push(h("span", { class: "chip", title: "Per-job model override", text: "Model: " + j.model }));
     return c;

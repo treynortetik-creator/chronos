@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.2 - 2026-10-07
+
+Restricted scheduled jobs. Everything from 0.2.1 keeps working unchanged: a job without the new field runs exactly as before.
+
+**Restricted jobs** - `"restricted": true` on a Claude job makes its scheduled (clock) runs use the narrow tool list event
+runs already used
+- `--permission-mode=default`, `--allowedTools` from the job's `allowed_tools` (default `Read`, `Grep`, `Glob` plus the
+  notify sender), `--tools`, the secret-path `--disallowedTools`, `--strict-mcp-config` unless the list names an MCP tool
+- never `--dangerously-skip-permissions` and none of `claude_args`
+- Chronos writes the report and the done-marker from the final message (the job has no Write tool unless you grant one);
+  success is a clean exit with no error result, so `require_marker` does not apply
+- the run prompt states the tool list and tells the job it is restricted; the Control Room shows a "Restricted: schedule" chip
+- refused together with `in_session: true` (a live session's permissions cannot be narrowed) and on command jobs
+- `bin/chronos jobenv` reports `CH_RESTRICTED`; `chronos record` takes `--restricted`
+
+**Tests** - 122 -> 134
+
 ## 0.2.1 - 2026-10-01
 
 Command jobs, and a quieter installer. Everything from 0.2.0 keeps working unchanged.

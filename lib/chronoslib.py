@@ -29,7 +29,7 @@ import shlex
 import sys
 import time
 
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 
 ID_RE = re.compile(r"^[a-z0-9-]{2,40}$")
 TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
@@ -187,6 +187,12 @@ def validate_job_record(j):
         raise ValueError("triggers must be a list")
     if j.get("kind") not in (None,) + JOB_KINDS:
         raise ValueError("kind must be one of %s" % ", ".join(JOB_KINDS))
+    if j.get("restricted") not in (None, True, False):
+        raise ValueError("restricted must be true or false")
+    if j.get("restricted") is True and j.get("in_session") is True:
+        raise ValueError("a restricted job cannot also run in a live session (that run would use the session's permissions, not the restricted list)")
+    if j.get("restricted") is True and j.get("kind") == "command":
+        raise ValueError("restricted applies to Claude jobs; a command job runs one fixed shell command and has no tools to restrict")
     if j.get("kind") == "command":
         cmd = j.get("command")
         if not isinstance(cmd, str) or not cmd.strip() or len(cmd) > MAX_COMMAND_LEN or "\0" in cmd:
@@ -203,6 +209,12 @@ def validate_job_record(j):
 def is_command(job):
     """True for a command job (\"kind\": \"command\"): a plain shell command, no claude, no prompt.md."""
     return isinstance(job, dict) and job.get("kind") == "command"
+
+
+def is_restricted(job):
+    """True for a Claude job with \"restricted\": true. Its CLOCK runs get the same narrow tool list event runs get
+    (the job's allowed_tools, else the default) and never --dangerously-skip-permissions or any of claude_args."""
+    return isinstance(job, dict) and job.get("restricted") is True and not is_command(job)
 
 
 def clock_on(job):
@@ -693,6 +705,7 @@ def job_env(cfg, jid):
     st = event_settings(cfg, job)
     q = shlex.quote
     return "\n".join([
+        "CH_RESTRICTED=%s" % ("1" if is_restricted(job) else "0"),
         "CH_JOB_MODEL=%s" % q(st["model"]),
         "CH_EV_ALLOWED=%s" % q(",".join(st["allowed"])),
         "CH_EV_TOOLS=%s" % q(",".join(st["builtin"])),
@@ -730,6 +743,31 @@ def preamble(cfg, job, ds, when=None):
         notify_line=NOTIFY_LINE.format(notify_bin=nb) if cfg["notify"] else "")
 
 
+RESTRICTED_PREAMBLE = """CHRONOS RUN: job "{id}" ({name}), {when}.
+You were started headless by Chronos, a scheduler. Nobody is watching this run, so do not ask questions:
+make reasonable decisions and finish.
+Chronos already holds this job's claim. Do not create or delete claim files.
+Your working directory is {workspace}. Stay there unless the task says otherwise.
+This is a one-shot print-mode run: when your reply ends, the process exits and anything still running
+in the background is killed. Never start background tasks or wait for notifications; run every step in
+the foreground and finish it before you reply.
+
+This job is RESTRICTED. Your tools are limited to: {tools}. Anything else is denied by the permission system, not
+just discouraged. If a call is denied, do not look for a way around it: skip that step and say so in your reply.
+Your final message IS the report: Chronos writes it to {report} and records the run as done when you finish
+cleanly. Do not write the report file and do not create a done-marker.
+{notify_line}Never print secrets."""
+
+
+def build_restricted_prompt(cfg, job, ds):
+    allowed = event_settings(cfg, job)["allowed"]
+    nb = os.path.join(ROOT_DIR, "bin", "chronos-notify")
+    notify_line = ('To message the owner mid-run, run exactly: %s "<short plain text>"\n' % nb) if any(a.startswith("Bash(" + nb) for a in allowed) else ""
+    when = "%s %s" % (now().strftime("%a %Y-%m-%d %H:%M"), tz_name())
+    return RESTRICTED_PREAMBLE.format(id=job["id"], name=job.get("name") or job["id"], when=when, workspace=cfg["workspace"],
+                                      tools=", ".join(allowed), report=report_path(cfg, job["id"], ds), notify_line=notify_line)
+
+
 def build_prompt(cfg, jid, ds=None):
     """preamble + optional locked guard.md + the editable prompt.md."""
     job = next((j for j in load_jobs(cfg) if j.get("id") == jid), None)
@@ -738,7 +776,7 @@ def build_prompt(cfg, jid, ds=None):
     if is_command(job):
         raise ValueError("this is a command job: it runs a shell command and has no prompt")
     ds = ds or date_key(job, now())
-    parts = [preamble(cfg, job, ds)]
+    parts = [build_restricted_prompt(cfg, job, ds) if is_restricted(job) else preamble(cfg, job, ds)]
     try:
         with open(guard_file(cfg, jid), encoding="utf-8") as fh:
             g = fh.read().strip()

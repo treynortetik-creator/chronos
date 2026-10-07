@@ -17,6 +17,12 @@
 # --strict-mcp-config so no MCP server loads. The `=` flag forms matter: --tools and --allowedTools are
 # variadic and would otherwise swallow the prompt argument.
 #
+# RESTRICTED CLOCK RUNS (v0.2.2): a job with "restricted": true gets the same narrow treatment on its scheduled runs
+# (--permission-mode=default, its allowed_tools, --tools, the secret-path denies, --strict-mcp-config, no claude_args,
+# so never --dangerously-skip-permissions). The default stays unchanged: a job without the field runs with claude_args
+# exactly as before. A restricted run cannot write its own report or marker, so Chronos does it from the final message
+# (the same way it does for an event run).
+#
 # Every run uses --output-format=stream-json so chronos_runlog.py can record tokens, cost and the rate-limit
 # readings (runs.jsonl, rate-limits.json) and turn the stream into the plain-text log.
 #
@@ -78,15 +84,17 @@ fi
 MODE="$("$PYBIN" "$DIR/chronos" field "$id" notify)"
 # per-job settings: CH_JOB_MODEL and, for events, CH_EV_ALLOWED / CH_EV_TOOLS / CH_EV_DENY / CH_EV_MCP.
 # A job that cannot be read is a failure; nothing falls back to a wider tool list.
-CH_JOB_MODEL=""
+CH_JOB_MODEL=""; CH_RESTRICTED=0
 if [ "$KIND" != command ]; then
   JOBENV="$("$PYBIN" "$DIR/chronos" jobenv "$id")" || fail_early "cannot read the job's settings"
   eval "$JOBENV"
 fi
 
+RESTRICTED=""
+[ "$KIND" != command ] && [ -z "$EVENT" ] && [ "$CH_RESTRICTED" = "1" ] && RESTRICTED=1
 if [ "$KIND" = command ]; then
   args=()
-elif [ -n "$EVENT" ]; then
+elif [ -n "$EVENT" ] || [ -n "$RESTRICTED" ]; then
   args=(-p --permission-mode=default "--allowedTools=$CH_EV_ALLOWED" "--tools=$CH_EV_TOOLS")
   [ -n "$CH_EV_DENY" ] && args+=("--disallowedTools=$CH_EV_DENY")
   [ "$CH_EV_MCP" = "open" ] || args+=(--strict-mcp-config)
@@ -121,7 +129,7 @@ record() {  # $1 = schedule|event. Builds $LOG from the stream and logs usage; a
   cp "$RAW" "$LOG" 2>/dev/null
   "$PYBIN" "$DIR/chronos" record --raw "$RAW" --log "$LOG" --err "$ERRF" --id "$id" --kind "$1" --start "$T0" --end "$(date +%s)" \
     --rc "$rc" --timed-out "$([ -n "$timed_out" ] && echo 1 || echo 0)" --model-flag "$CH_JOB_MODEL" --ttype "$ETYPE" --thash "$EHASH" \
-    --marker-path "$RAN" --command "$([ "$KIND" = command ] && echo 1 || echo 0)" 2>>"$CH_LOGS/chronos.log"
+    --marker-path "$RAN" --command "$([ "$KIND" = command ] && echo 1 || echo 0)" --restricted "$([ -n "$RESTRICTED" ] && echo 1 || echo 0)" 2>>"$CH_LOGS/chronos.log"
 }
 
 if [ -n "$EVENT" ]; then
@@ -145,8 +153,15 @@ if [ -n "$EVENT" ]; then
 fi
 
 # clock run. success = the job wrote its done-marker, or (unless require_marker) the process exited 0 on its own
-if [ ! -f "$RAN" ] && { [ -z "$CH_REQUIRE_MARKER" ] || [ "$KIND" = command ]; } && [ "$rc" -eq 0 ] && [ -z "$timed_out" ]; then touch "$RAN"; fi
-record schedule >/dev/null || true
+if [ -n "$RESTRICTED" ]; then
+  # restricted run: the job has no way to write a marker or a report. Success = a clean exit inside the watchdog with no
+  # error result (require_marker cannot apply: nothing but Chronos may write the marker). Chronos writes the report.
+  OKREC="$(record schedule)" || OKREC=""
+  if [ ! -f "$RAN" ] && [ "$rc" -eq 0 ] && [ -z "$timed_out" ] && [ "$OKREC" != "fail" ]; then touch "$RAN"; cp "$LOG" "$REPORT" 2>/dev/null; fi
+else
+  if [ ! -f "$RAN" ] && { [ -z "$CH_REQUIRE_MARKER" ] || [ "$KIND" = command ]; } && [ "$rc" -eq 0 ] && [ -z "$timed_out" ]; then touch "$RAN"; fi
+  record schedule >/dev/null || true
+fi
 rm -f "$RAW" "$ERRF"
 # a command writes no report of its own: the tail of its output is the report (notices and notify=always show it)
 if [ "$KIND" = command ] && [ -f "$RAN" ]; then tail -n 40 "$LOG" > "$REPORT" 2>/dev/null || true; fi

@@ -53,6 +53,8 @@ The list is the `disable_plugins` config key. Delivery from Chronos itself is a 
 - `jobs.json` schedule: daily, weekdays, specific weekdays, days of month, or a one-shot date and time
 - Per-job prompt in `jobs/<id>/prompt.md`, plus an optional locked `guard.md`
 - Per-job `model` (passed as `--model`)
+- **Restricted jobs (0.2.2)**: `"restricted": true` makes a job's scheduled runs use a narrow tool list instead of
+  skipping permissions. See [Restricted jobs](#restricted-jobs)
 - **Command jobs (0.2.1)**: a job can run a plain shell command instead of Claude, with the same claim,
   watchdog, log and notify and no tokens spent. See [Command jobs](#command-jobs)
 - Pause one job or everything (`touch` a file, or a button); run now, with confirmation if it already ran today
@@ -205,7 +207,8 @@ A JSON list of objects:
 | `command` | string | The shell command of a `command` job (up to 2000 characters). |
 | `clock` | bool | `false` makes an event-only job: no clock schedule, it starts only on `triggers`. Default `true`. |
 | `triggers` | list | Event triggers, see [docs/triggers.md](docs/triggers.md). Not allowed on one-shots. |
-| `allowed_tools` | list | Tool list for this job's **event** runs (`--allowedTools` syntax). Default: the `event_allowed_tools` config key. |
+| `allowed_tools` | list | Tool list for this job's **event** runs, and for its **scheduled** runs when `restricted` is `true` (`--allowedTools` syntax). Default: the `event_allowed_tools` config key. |
+| `restricted` | bool | `true`: scheduled runs of this job get the narrow tool list (no `--dangerously-skip-permissions`, none of `claude_args`). Default `false` (unchanged behaviour). See [Restricted jobs](#restricted-jobs). |
 | `created`, `updated` | ISO timestamp | Bookkeeping. |
 
 A job is **due** when it is enabled, scheduled today, past `time + grace_min`, inside `catchup_min`, not
@@ -309,9 +312,45 @@ Timezone is the system timezone; there is no setting. Environment variables for 
 approval. For **clock runs** the default `--dangerously-skip-permissions` lets the job do anything your
 user can do. That is the right default for a tool you point at your own prompts, and the wrong one if a
 prompt can be influenced by untrusted input. **Event runs never use it** (and ignore `claude_args`
-entirely); see the security model. Tighten it with `claude_args`, for example
+entirely); see the security model. A job with `"restricted": true` gives its clock runs the same narrow
+treatment, see [Restricted jobs](#restricted-jobs). To tighten every job at once use `claude_args`, for example
 `["--permission-mode", "acceptEdits", "--allowedTools", "Read", "Bash(git log:*)"]`, and use `guard.md`
 for rules a job must keep.
+
+## Restricted jobs
+
+Added in 0.2.2. By default a scheduled (clock) run is started with your `claude_args`, which is
+`--dangerously-skip-permissions`: the job is trusted, so a prompt that says "never send anything" is a request,
+not a lock. Set `"restricted": true` on a job and its scheduled runs are launched the way event runs are:
+
+- `--permission-mode=default`, so anything outside the allow list is **denied** (nobody is there to approve it)
+- `--allowedTools` = the job's `allowed_tools`, or, when it has none, `Read`, `Grep`, `Glob` plus the notify sender
+- `--tools` limited to the built-ins that list names, `--strict-mcp-config` unless the list names an `mcp__` tool
+- `--disallowedTools` for `.env` files, `~/.ssh`, `~/.aws`, `~/.gnupg`, Chronos's own folders and Claude's credentials
+- never `--dangerously-skip-permissions`, and none of `claude_args`
+
+A restricted run cannot write its own report or done-marker (it has no Write tool unless you allow one), so
+**Chronos writes them** from the final message, exactly as it does for an event run. Success means a clean exit
+inside the watchdog with no error result; `require_marker` does not apply to a restricted job.
+
+```json
+{"id": "weekly-lint", "name": "Weekly lint", "time": "08:17", "days": "mon", "restricted": true,
+ "allowed_tools": ["Read", "Grep", "Glob",
+                   "Edit(//Users/me/agent/memory/briefs/**)",
+                   "Bash(python3 /Users/me/agent/scripts/lint.py:*)"], ...}
+```
+
+Rules worth knowing (checked against Claude Code 2.1.x, 2026-10-07):
+- Path rules: `//abs/path/**` is an absolute path. Use `Edit(...)`: it covers Write, Edit and MultiEdit.
+  `Write(//...)` did not match in testing.
+- A `Bash(<prefix>:*)` rule allows any command that STARTS with the prefix. Name a script, not an interpreter.
+  A rule without `:*` matches that exact command only. Chaining (`a && b`) is split and each part must match.
+- Claude Code itself lets read-only shell commands through in default mode (`ls`, `head`, `grep`, `git status`,
+  `date`). That is read access inside the working directory, not write access.
+- A job with `"restricted": true` cannot also be `in_session`: a live session runs with the session's own
+  permissions, which Chronos cannot narrow. The pair is refused.
+- It does not apply to command jobs (they run one fixed shell command and have no tools).
+- `"restricted": false`, or leaving the field out, keeps the old behaviour: that is the opt-out.
 
 ## Optional: SessionStart hook
 
@@ -389,7 +428,7 @@ loopback-only bind, the webhook secret and throttle, and that no event run ever 
 tests/run.sh
 ```
 
-122 tests, about a minute. They cover the tick's due logic with a fake clock (grace, catch-up, days,
+134 tests, about a minute. They cover the tick's due logic with a fake clock (grace, catch-up, days,
 markers, pause, one-shots, a broken `jobs.json`), concurrent claims, the run script against a fake
 `claude` (success, failure, watchdog, one-shot disabling, the plugin-disable flags), the hook, the UI's auth
 and path rules, and for 0.2.0: every trigger type (baselines, settling, rate limit, missing Gmail/`gh`

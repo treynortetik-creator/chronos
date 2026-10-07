@@ -1832,8 +1832,8 @@ class CommandJobs(unittest.TestCase):
 class Version(unittest.TestCase):
     def test_version_is_reported_everywhere(self):
         r = subprocess.run([sys.executable, CLI, "--version"], capture_output=True, text=True)
-        self.assertEqual(r.stdout.strip(), "chronos 0.2.1")
-        self.assertEqual(C.VERSION, "0.2.1")
+        self.assertEqual(r.stdout.strip(), "chronos 0.2.2")
+        self.assertEqual(C.VERSION, "0.2.2")
         self.assertIn("## 0.2.1", open(os.path.join(ROOT, "CHANGELOG.md")).read())
 
 
@@ -1945,7 +1945,7 @@ class Installer(unittest.TestCase):
         home, out = self.install("--no-load", "--quiet")
         lines = [l for l in out.splitlines() if l.strip()]
         self.assertEqual(len(lines), 1, out)
-        self.assertTrue(lines[0].startswith("chronos 0.2.1 installed:"), lines[0])
+        self.assertTrue(lines[0].startswith("chronos 0.2.2 installed:"), lines[0])
         self.assertIn("scheduler NOT loaded (--no-load)", lines[0])
         self.assertNotIn("empty jobs.json", out)
         self.assertTrue(os.path.isfile(os.path.join(home, ".config", "chronos", "jobs.json")))     # quiet changes the words, not the work
@@ -1977,6 +1977,140 @@ class Installer(unittest.TestCase):
         for rel in ("lib/chronos_triggers.py", "lib/chronos_runlog.py", "ui/control_room.py", "ui/agent_files.py", "examples/gmail/imap-search.py", "bin/chronos-run.sh"):
             self.assertTrue(os.path.isfile(os.path.join(base, rel)), rel)
         self.assertFalse(os.path.exists(os.path.join(home, "Library", "LaunchAgents", "io.github.chronos.ui.plist")))   # --no-ui
+
+
+class RestrictedClockRuns(unittest.TestCase):
+    """v0.2.2: "restricted": true gives a job's SCHEDULED runs the narrow tool list instead of claude_args (skip-permissions)."""
+
+    def setUp(self):
+        self.D = today()
+        self.e = None
+
+    def tearDown(self):
+        if self.e:
+            self.e.cleanup()
+
+    def start(self, jobs=None, **cfg):
+        self.e = Env(jobs or [job("rj", restricted=True)], claude_args=["--dangerously-skip-permissions", "--add-dir", "/"], **cfg)
+        self.st = self.e.cfg["state_dir"]
+        return self.e
+
+    def tick(self, **extra):
+        return self.e.run(["/bin/bash", TICK], CHRONOS_NOW=self.D + "T09:30", **extra)
+
+    def settle(self, jid="rj"):
+        def done():
+            outcome = os.path.exists(os.path.join(self.st, "ran-%s-%s" % (jid, self.D))) or os.path.exists(os.path.join(self.st, "failed-%s-%s" % (jid, self.D)))
+            return outcome and not os.path.isdir(os.path.join(self.st, "claim-%s-%s" % (jid, self.D)))
+        self.assertTrue(self.e.wait_for(done), "run did not finish")
+
+    def fake(self):
+        return open(self.e.fake_log).read()
+
+    def test_restricted_clock_run_never_skips_permissions(self):
+        self.start(notify="")
+        self.tick()
+        self.settle()
+        log = self.fake()
+        self.assertNotIn("--dangerously-skip-permissions", log)
+        self.assertNotIn("--add-dir", log)                                    # none of claude_args
+        self.assertIn("--permission-mode=default", log)
+        self.assertIn("--allowedTools=Read,Grep,Glob ", log)                  # the default list: read-only (no notify command configured)
+        self.assertIn("--tools=Read,Grep,Glob ", log)
+        self.assertIn("--strict-mcp-config", log)
+        self.assertIn("--disallowedTools=Read(**/.env),", log)
+        self.assertIn('"telegram@claude-plugins-official":false', log)
+        self.assertIn("CHRONOS_RUN=1", log)
+
+    def test_job_allowed_tools_apply_to_the_clock_run(self):
+        self.start([job("rj", restricted=True, allowed_tools=["Read", "Edit(//agent/memory/**)", "Bash(bash /agent/scripts/x.sh)"])])
+        self.tick()
+        self.settle()
+        log = self.fake()
+        self.assertIn("--allowedTools=Read,Edit(//agent/memory/**),Bash(bash /agent/scripts/x.sh) ", log)
+        self.assertIn("--tools=Read,Edit,Bash ", log)
+        self.assertNotIn("--dangerously-skip-permissions", log)
+
+    def test_mcp_tool_in_the_list_opens_mcp_and_nothing_else_does(self):
+        self.start([job("rj", restricted=True, allowed_tools=["Read", "mcp__calendar__list_events"])])
+        self.tick()
+        self.settle()
+        log = self.fake()
+        self.assertNotIn("--strict-mcp-config", log)
+        self.assertIn("--tools=Read ", log)
+
+    def test_prompt_states_the_tool_list_and_that_chronos_writes_the_report(self):
+        self.start([job("rj", restricted=True, allowed_tools=["Read", "Grep"])])
+        self.tick()
+        self.settle()
+        log = self.fake()
+        self.assertIn("This job is RESTRICTED. Your tools are limited to: Read, Grep.", log)
+        self.assertIn("Do not write the report file and do not create a done-marker.", log)
+        self.assertNotIn("2. Create the done-marker", log)
+        self.assertIn("TASK-BODY-rj", log)
+        self.assertIn("Never start background tasks", log)
+
+    def test_chronos_writes_the_marker_and_report_when_the_job_cannot(self):
+        self.start()
+        self.tick(FAKE_STREAM="1")                                            # the fake does not touch a marker: the prompt has no marker step
+        self.settle()
+        self.assertTrue(os.path.exists(os.path.join(self.st, "ran-rj-" + self.D)))
+        rep = os.path.join(self.st, "reports", "rj-%s.md" % self.D)
+        self.assertTrue(os.path.exists(rep))
+        self.assertIn("done", open(rep).read())
+        self.assertTrue(os.path.exists(os.path.join(self.st, "notices", "rj-%s.json" % self.D)))
+
+    def test_restricted_run_ignores_require_marker(self):
+        self.start(require_marker=True)
+        self.tick()
+        self.settle()
+        self.assertTrue(os.path.exists(os.path.join(self.st, "ran-rj-" + self.D)))
+
+    def test_failed_and_error_results_fail_the_day(self):
+        self.start()
+        self.tick(FAKE_MODE="fail")
+        self.settle()
+        self.assertTrue(os.path.exists(os.path.join(self.st, "failed-rj-" + self.D)))
+        self.assertFalse(os.path.exists(os.path.join(self.st, "ran-rj-" + self.D)))
+
+    def test_error_result_in_the_stream_fails_the_day(self):
+        self.start()
+        self.tick(FAKE_MODE="iserror", FAKE_STREAM="1")
+        self.settle()
+        self.assertTrue(os.path.exists(os.path.join(self.st, "failed-rj-" + self.D)))
+        self.assertFalse(os.path.exists(os.path.join(self.st, "ran-rj-" + self.D)))
+
+    def test_a_job_without_the_field_is_unchanged(self):
+        self.start([job("plain")])
+        self.tick()
+        self.settle("plain")
+        log = self.fake()
+        self.assertIn("--dangerously-skip-permissions", log)                  # the default is exactly what it was
+        self.assertNotIn("--permission-mode=default", log)
+        self.assertNotIn("RESTRICTED", log)
+        self.assertIn("2. Create the done-marker", log)
+
+    def test_restricted_false_is_the_explicit_opt_out(self):
+        self.start([job("full", restricted=False)])
+        self.tick()
+        self.settle("full")
+        self.assertIn("--dangerously-skip-permissions", self.fake())
+
+    def test_record_validation(self):
+        C.validate_job_record(job("aa", restricted=True))
+        C.validate_job_record(job("aa", restricted=False))
+        for bad in (job("aa", restricted="yes"), job("aa", restricted=True, in_session=True),
+                    job("aa", restricted=True, kind="command", command="true")):
+            with self.assertRaises(ValueError):
+                C.validate_job_record(bad)
+        self.assertTrue(C.is_restricted(job("aa", restricted=True)))
+        self.assertFalse(C.is_restricted(job("aa")))
+        self.assertFalse(C.is_restricted(job("aa", restricted=1)))              # only a real true counts
+
+    def test_jobenv_reports_the_mode(self):
+        self.start([job("rj", restricted=True), job("plain")])
+        self.assertIn("CH_RESTRICTED=1", C.job_env(self.e.cfg, "rj"))
+        self.assertIn("CH_RESTRICTED=0", C.job_env(self.e.cfg, "plain"))
 
 
 if __name__ == "__main__":
