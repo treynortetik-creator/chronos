@@ -17,7 +17,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import golden  # noqa: E402
 
 GOLDEN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "golden", "api")
-VERBS = ("version", "snapshot", "detail", "validate", "apply", "pause", "disable", "config", "due", "session-beat", "approved", "migrate")
+VERBS = ("version", "snapshot", "detail", "validate", "apply", "pause", "disable", "config", "due", "session-beat", "approved", "migrate",
+         "claim", "finish", "orphans", "start", "session-prompt", "health", "probe")
 
 
 class Golden(unittest.TestCase):
