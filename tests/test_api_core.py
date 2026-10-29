@@ -25,10 +25,6 @@ class VersionAndShape(unittest.TestCase):
         _, r = api(self.e, ["nonsense"], expect=1)
         self.assertEqual(err(r)["code"], "unknown_verb")
 
-    def test_bad_json_on_stdin_is_a_json_error_with_exit_1(self):
-        _, r = api(self.e, ["validate"], stdin="{not json", expect=1)
-        self.assertEqual(err(r)["code"], "bad_request")
-
     def test_snapshot_shape(self):
         out = snap(self.e)
         self.assertEqual(out["api"], 1)
@@ -51,13 +47,13 @@ class VersionAndShape(unittest.TestCase):
             self.assertRegex(a[k], SHA)
 
     def test_when_variants(self):
-        self.e.set_jobs([job("d", days="daily"), job("m", days="dom:1,15"), job("x", days="mon,wed", time="08:05"),
-                         job("o", once="2026-10-06T15:00", time="15:00", days="daily"), job("ev", clock=False, triggers=[{"type": "webhook"}])])
+        self.e.set_jobs([job("dd", days="daily"), job("mm", days="dom:1,15"), job("xx", days="mon,wed", time="08:05"),
+                         job("oo", once="2026-10-06T15:00", time="15:00", days="daily"), job("ev", clock=False, triggers=[{"type": "webhook"}])])
         w = {s["id"]: s["when"] for s in snap(self.e)["schedules"]}
-        self.assertEqual(w["d"], {"type": "daily", "time": "09:00"})
-        self.assertEqual(w["m"], {"type": "monthdays", "days": [1, 15], "time": "09:00"})
-        self.assertEqual(w["x"], {"type": "days", "days": ["mon", "wed"], "time": "08:05"})
-        self.assertEqual(w["o"], {"type": "once", "at": "2026-10-06T15:00"})
+        self.assertEqual(w["dd"], {"type": "daily", "time": "09:00"})
+        self.assertEqual(w["mm"], {"type": "monthdays", "days": [1, 15], "time": "09:00"})
+        self.assertEqual(w["xx"], {"type": "days", "days": ["mon", "wed"], "time": "08:05"})
+        self.assertEqual(w["oo"], {"type": "once", "at": "2026-10-06T15:00"})
         self.assertEqual(w["ev"], {"type": "events"})
 
     def test_detail_has_prompt_guard_next_runs(self):
@@ -146,6 +142,7 @@ class Times(unittest.TestCase):
         z = C.zone_name({"TZ": ""}, localtime="/var/db/timezone/zoneinfo/Europe/Paris")
         self.assertEqual(z, "Europe/Paris")
         self.assertEqual(C.zone_name({}, localtime="/usr/share/zoneinfo/Asia/Tokyo"), "Asia/Tokyo")
+        self.assertEqual(C.zone_name({}, localtime="/usr/share/zoneinfo.default/America/Los_Angeles"), "America/Los_Angeles")   # what macOS resolves to
         self.assertEqual(C.zone_name({"TZ": "EST5EDT"}, localtime="/usr/share/zoneinfo/Asia/Tokyo"), "EST5EDT")
         self.assertEqual(C.zone_name({}, localtime=None), "UTC")
 

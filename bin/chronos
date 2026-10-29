@@ -18,6 +18,8 @@
   chronos record --raw ... --id ...    usage meter: turn a stream-json run into its log and a runs.jsonl row (used by the run script)
   chronos disable-once <id>            switch a finished one-shot job off
   chronos notice <id> <date> <log> <report> [status]
+  chronos api <verb>                   the JSON interface for other programs (version, snapshot, detail, validate, apply, pause,
+                                       disable, config set, due --for session, session-beat, approved, migrate); see README "The API"
 """
 import os
 import sys
@@ -36,6 +38,14 @@ def main(argv):
         print(__doc__)
         return 0
     cmd, args = argv[0], argv[1:]
+    if cmd == "api":
+        import chronos_api as API
+        try:
+            api_cfg = C.load_config()
+        except RuntimeError as e:
+            sys.stdout.write('{"error": {"code": "config_unreadable", "message": %s, "fields": []}}\n' % __import__("json").dumps(str(e)))
+            return 1
+        return API.run(args, api_cfg)
     try:
         cfg = C.load_config()
     except RuntimeError as e:
@@ -44,6 +54,8 @@ def main(argv):
     if cmd == "env":
         print(C.shell_env(cfg))
     elif cmd == "due":
+        if os.environ.get("CHRONOS_TEST_BLOCK_FIFO"):   # tests only: block in the kernel like a stuck privacy check does
+            open(os.environ["CHRONOS_TEST_BLOCK_FIFO"], "rb").read()
         try:
             due = C.due_jobs(cfg)
         except RuntimeError as e:
