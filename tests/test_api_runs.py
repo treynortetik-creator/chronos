@@ -237,5 +237,194 @@ class Orphans(Base):
         self.assertEqual(err(r)["code"], "bad_request")
 
 
+class SessionPrompt(Base):
+    def test_returns_the_guard_the_prompt_and_the_content_hash(self):
+        out, _ = api(self.e, ["session-prompt", "morning"], now=NOW)
+        self.assertEqual(out, {"guard": None, "prompt": "Say hello. TASK-BODY-morning\n", "content_hash": expected_content_hash(self.e, "morning")})
+        with open(os.path.join(self.e.cfg["jobs_dir"], "morning", "guard.md"), "w") as fh:
+            fh.write("Never delete anything.\n")
+        out, _ = api(self.e, ["session-prompt", "morning"], now=NOW)
+        self.assertEqual(out["guard"], "Never delete anything.\n")
+        self.assertEqual(out["content_hash"], expected_content_hash(self.e, "morning"))
+
+    def test_a_held_job_is_refused_with_held(self):
+        e = Env([job("morning", time="07:30", in_session=True, headless=False)], approval_required=True)
+        try:
+            self.assertEqual(err(api(e, ["session-prompt", "morning"], now=NOW, expect=1)[1])["code"], "held")
+        finally:
+            e.cleanup()
+
+    def test_restricted_command_unknown_and_bad_ids(self):
+        self.e.set_jobs([job("rest", restricted=True, allowed_tools=["Read"]), job("cmd", kind="command", command="true")])
+        self.assertEqual(err(api(self.e, ["session-prompt", "rest"], now=NOW, expect=1)[1])["code"], "schedule_invalid")
+        self.assertEqual(err(api(self.e, ["session-prompt", "cmd"], now=NOW, expect=1)[1])["code"], "schedule_invalid")
+        self.assertEqual(err(api(self.e, ["session-prompt", "nope"], now=NOW, expect=1)[1])["code"], "not_found")
+        self.assertEqual(err(api(self.e, ["session-prompt", "../x"], now=NOW, expect=1)[1])["code"], "bad_request")
+
+
+class StartHeadless(unittest.TestCase):
+    def setUp(self):
+        self.e = Env([job("bg", time="07:30"), job("sess", time="07:30", in_session=True, headless=False)])
+        self.st = self.e.cfg["state_dir"]
+
+    def tearDown(self):
+        self.e.cleanup()
+
+    def start(self, jid="bg", payload=None, now=NOW, **kw):
+        return api(self.e, ["start", jid], payload if payload is not None else {"again": False}, now=now, **kw)[0]
+
+    def test_start_runs_the_job_with_a_run_id_a_row_and_a_per_run_report(self):
+        out = self.start()
+        self.assertTrue(out["ok"], out)
+        rid = out["run_id"]
+        self.assertRegex(rid, r"^r_[0-9A-HJKMNP-TV-Z]{26}$")
+        self.assertEqual(out["ds"], DS)
+        self.assertTrue(self.e.wait_for(lambda: os.path.exists(os.path.join(self.st, "ran-bg-" + DS)) and not os.path.isdir(os.path.join(self.st, "claim-bg-" + DS))), "run did not finish")
+        self.assertTrue(self.e.wait_for(lambda: os.path.exists(self.e.cfg["runs_file"])))
+        row = [json.loads(l) for l in open(self.e.cfg["runs_file"])][-1]
+        self.assertEqual((row["job"], row["run_id"], row["ds"], row["runner"], row["status"], row["trigger_kind"]), ("bg", rid, DS, "headless", "ok", "run_now"))
+        self.assertTrue(os.path.realpath(row["claude_path"]).endswith("fake-claude.sh"), row["claude_path"])
+        self.assertTrue(os.path.exists(os.path.join(self.st, "reports", "bg-%s-%s.md" % (DS, rid))))
+        self.assertTrue(os.path.exists(os.path.join(self.st, "reports", "bg-%s.md" % DS)))
+        self.assertFalse(os.path.exists(os.path.join(self.st, "claim-bg-%s.owner.json" % DS)))
+        self.assertEqual(sched(self.e, "bg", now=NOW)["last_run"]["run_id"], rid)
+
+    def test_refusals_use_the_start_codes(self):
+        os.makedirs(os.path.join(self.st, "claim-bg-" + DS))
+        self.assertEqual(self.start()["code"], "already_running")
+        os.rmdir(os.path.join(self.st, "claim-bg-" + DS))
+        self.assertEqual(self.start("sess")["code"], "schedule_invalid")                                    # a session-only job has no background run
+        self.e.touch(self.st, "ran-bg-" + DS)
+        out = self.start()
+        self.assertEqual((out["ok"], out["code"]), (False, "schedule_invalid"))                              # already ran: needs `again`
+        open(self.e.cfg["blocked_file"], "w").write('{"reason": "launch_stalled"}')
+        self.assertEqual(self.start()["code"], "headless_blocked")
+        self.assertFalse(os.path.isdir(os.path.join(self.st, "claim-bg-" + DS)))
+
+    def test_a_held_job_is_not_started(self):
+        e = Env([job("bg", time="07:30")], approval_required=True)
+        try:
+            self.assertEqual(api(e, ["start", "bg"], {"again": False}, now=NOW)[0]["code"], "held")
+        finally:
+            e.cleanup()
+
+
+class Health(Base):
+    cfg = {}
+
+    def health(self, now=NOW, **kw):
+        return api(self.e, ["health"], now=now, **kw)[0]
+
+    def codes(self, h):
+        return sorted(i["code"] for i in h["issues"])
+
+    def test_a_quiet_install_has_no_issues_and_reports_the_raw_signals(self):
+        self.e.set_jobs([job("bg", time="07:30")])
+        h = self.health()
+        self.assertEqual((h["issues"], h["headless"], h["paused_all"], h["tz"], h["session_runner"], h["tcc_suspected"]), ([], "ok", False, NY, "hook", False))
+        self.assertIsNone(h["tick_age_s"])
+        self.assertRegex(h["as_of"], RFC3339)
+        self.e.touch(self.e.cfg["home_dir"], "chronos.beat")
+        open(self.e.cfg["beat_file"], "w").write("2026-10-05T07:40:00\n")
+        self.assertEqual(self.health()["tick_age_s"], 300)
+
+    def test_headless_is_unused_when_no_job_runs_in_the_background(self):
+        self.assertEqual(self.health()["headless"], "unused")           # the only job is session-only
+
+    def test_paused_held_both_and_missed(self):
+        self.e.touch(self.e.cfg["pause_all"])
+        self.e.set_jobs([job("both", time="07:30", in_session=True), job("gone", time="05:00")])
+        h = self.health(now="2026-10-05T09:00")
+        self.assertEqual(self.codes(h), ["legacy_both_runner", "missed_recently", "paused_all"])
+        self.assertEqual([i["schedule_id"] for i in h["issues"] if i["code"] == "legacy_both_runner"], ["both"])
+        self.assertEqual([i["schedule_id"] for i in h["issues"] if i["code"] == "missed_recently"], ["gone"])      # 05:00 + 180 min = 08:00
+        e = Env([job("h", time="07:30")], approval_required=True)
+        try:
+            self.assertEqual(self.codes(api(e, ["health"], now=NOW)[0]), ["held_jobs"])
+        finally:
+            e.cleanup()
+
+    def test_a_blocked_headless_with_the_workspace_under_a_protected_folder_is_tcc_suspected(self):
+        home = self.e.tmp
+        ws = os.path.join(home, "Desktop", "agent")
+        e = Env([job("bg", time="07:30")], workspace=ws)
+        try:
+            open(e.cfg["blocked_file"], "w").write(json.dumps({"reason": "launch_stalled", "id": "bg", "ds": DS, "run_id": RID1}))
+            h = api(e, ["health"], now=NOW, HOME=home)[0]
+            self.assertEqual(self.codes(h), ["headless_blocked", "launch_stalled", "tcc_suspected"])
+            self.assertEqual((h["headless"], h["tcc_suspected"]), ("blocked", True))
+            h = api(e, ["health"], now=NOW, HOME=os.path.join(home, "elsewhere"))[0]                      # same block, no protected path
+            self.assertEqual(self.codes(h), ["headless_blocked", "launch_stalled"])
+            self.assertFalse(h["tcc_suspected"])
+        finally:
+            e.cleanup()
+
+    def test_a_changed_claude_path_since_the_last_good_headless_run_is_tcc_suspected(self):
+        e = Env([job("bg", time="07:30")])
+        try:
+            open(e.cfg["blocked_file"], "w").write(json.dumps({"reason": "launch_stalled"}))
+            with open(e.cfg["runs_file"], "w") as fh:
+                fh.write(json.dumps({"job": "bg", "run_id": RID1, "ds": DS, "runner": "headless", "status": "ok", "ok": True, "claude_path": "/old/versions/1.0/claude", "start_ts": 1}) + "\n")
+            self.assertTrue(api(e, ["health"], now=NOW)[0]["tcc_suspected"])
+        finally:
+            e.cleanup()
+
+    def test_a_stalled_day_is_reported_and_a_run_past_its_timeout_is_run_hung(self):
+        self.e.set_jobs([job("bg", time="07:30"), job("stuck", time="06:00")])
+        self.e.touch(self.st, "stalled-bg-" + DS)
+        os.makedirs(os.path.join(self.st, "claim-stuck-" + DS))
+        with open(os.path.join(self.st, "claim-stuck-%s.owner.json" % DS), "w") as fh:
+            json.dump({"run_id": RID2, "ds": DS, "runner": "headless", "claimed_at": DS + "T06:00:00-04:00"}, fh)
+        h = self.health(now="2026-10-05T07:00")                                       # 60 min in, timeout_min 40 + 5
+        self.assertEqual([i["schedule_id"] for i in h["issues"] if i["code"] == "run_hung"], ["stuck"])
+        self.assertEqual([i["schedule_id"] for i in h["issues"] if i["code"] == "launch_stalled"], ["bg"])
+
+
+class Probe(unittest.TestCase):
+    def setUp(self):
+        self.e = Env([job("bg", time="07:30")], probe_timeout_s=3)
+        self.ld = os.path.join(self.e.tmp, "launchd")
+        self.kw = {"CHRONOS_LAUNCHCTL": os.path.join(ROOT, "tests", "fake-launchctl.sh"), "FAKE_LAUNCHCTL_DIR": self.ld}
+
+    def tearDown(self):
+        self.e.cleanup()
+
+    def calls(self):
+        p = os.path.join(self.ld, "calls.log")
+        return open(p).read() if os.path.exists(p) else ""
+
+    def block(self):
+        open(self.e.cfg["blocked_file"], "w").write(json.dumps({"reason": "launch_stalled", "id": "bg", "ds": DS}))
+
+    def test_probe_ok_clears_the_block_and_runs_claude_the_way_a_real_run_does(self):
+        self.block()
+        out, _ = api(self.e, ["probe"], {}, now=NOW, **self.kw)
+        self.assertEqual((out["ok"], out["stalled_in_window"]), (True, []))
+        self.assertFalse(os.path.exists(self.e.cfg["blocked_file"]))
+        self.assertIn("submit -l io.github.chronos.probe.", self.calls())
+        log = open(self.e.fake_log).read()
+        self.assertIn("CHRONOS_RUN=1", log)
+        self.assertIn("--max-turns 1", log)
+        self.assertIn("Reply with the word OK.", log)
+        self.assertIn('"telegram@claude-plugins-official":false', log)                 # the same plugin-off settings as a real run
+        self.assertIn("CWD=" + self.e.cfg["workspace"].replace("/private", ""), log)
+
+    def test_with_the_hanging_fake_probe_re_trips_the_block_with_tcc_suspected(self):
+        self.block()
+        out, _ = api(self.e, ["probe"], {}, now=NOW, FAKE_MODE="hang", **self.kw)
+        self.assertFalse(out["ok"])
+        blk = json.load(open(self.e.cfg["blocked_file"]))
+        self.assertEqual((blk["reason"], blk["tcc_suspected"], blk["source"]), ("launch_stalled", True, "probe"))
+        self.assertIn("remove io.github.chronos.probe.", self.calls())                  # the hung one-off job is removed, by label
+
+    def test_a_successful_probe_lists_stalled_days_still_inside_their_window(self):
+        self.block()
+        self.e.touch(self.e.cfg["state_dir"], "stalled-bg-" + DS)
+        out, _ = api(self.e, ["probe"], {}, now=NOW, **self.kw)
+        self.assertEqual(out["stalled_in_window"], [{"id": "bg", "ds": DS}])
+        out, _ = api(self.e, ["probe"], {}, now="2026-10-05T12:00", **self.kw)             # window (07:30 + 180) is over
+        self.assertEqual(out["stalled_in_window"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

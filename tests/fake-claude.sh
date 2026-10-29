@@ -36,6 +36,7 @@ case "${FAKE_MODE:-ok}" in
   fail) echo "simulated failure"; exit 1 ;;
   iserror) say "the model reported an error" true; exit 0 ;;
   nomarker) say "did the thing but forgot the marker"; [ -n "$report" ] && echo "report" > "$report"; exit 0 ;;
-  *) [ -n "$report" ] && { mkdir -p "$(dirname "$report")"; echo "# Report: all good" > "$report"; }
+  *) if [ "$prompt" = "Reply with the word OK." ]; then echo "OK"; exit 0; fi       # the probe
+     [ -n "$report" ] && { mkdir -p "$(dirname "$report")"; echo "# Report: all good" > "$report"; }
      [ -n "$ran" ] && touch "$ran"; say "done"; exit 0 ;;
 esac
