@@ -111,3 +111,52 @@ def snap(e, **kw):
 
 def sched(e, jid, **kw):
     return next(s for s in snap(e, **kw)["schedules"] if s["id"] == jid)
+
+
+# --------------------------------------------------------------------------- a throwaway web UI for the tests that need one
+import http.client  # noqa: E402
+import socket  # noqa: E402
+import time  # noqa: E402
+
+
+class UIServer(object):
+    """Start ui/server.py against an Env on a free port; .req(method, path, body) -> (status, json-or-text)."""
+
+    def __init__(self, e):
+        self.e = e
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        self.port = s.getsockname()[1]
+        s.close()
+        self.proc = subprocess.Popen([sys.executable, SERVER], env=e.env(CHRONOS_UI_PORT=str(self.port)), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        end = time.time() + 10
+        while time.time() < end:
+            try:
+                socket.create_connection(("127.0.0.1", self.port), timeout=0.3).close()
+                break
+            except OSError:
+                time.sleep(0.1)
+        self.token = open(e.cfg["token_file"]).read().strip()
+
+    def req(self, method, path, body=None, token=True, timeout=30):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
+        c.putrequest(method, path, skip_host=True)
+        c.putheader("Host", "127.0.0.1:%d" % self.port)
+        if token:
+            c.putheader("X-Chronos-Token", self.token)
+        data = json.dumps(body).encode() if body is not None else None
+        if data is not None:
+            c.putheader("Content-Type", "application/json")
+            c.putheader("Content-Length", str(len(data)))
+        c.endheaders(data)
+        r = c.getresponse()
+        raw = r.read().decode("utf-8", "replace")
+        c.close()
+        try:
+            return r.status, json.loads(raw)
+        except ValueError:
+            return r.status, raw
+
+    def stop(self):
+        self.proc.terminate()
+        self.proc.wait(timeout=5)
