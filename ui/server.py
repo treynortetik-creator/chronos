@@ -44,6 +44,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "lib"))
 import chronoslib as C  # noqa: E402
 import chronos_runlog as RL  # noqa: E402  (usage meter: runs.jsonl, rate-limits.json)
 import chronos_triggers as TR  # noqa: E402  (event triggers, webhook secrets and queue)
+import chronos_write as W  # noqa: E402  (the one writer for jobs.json, prompts and the approved record)
 import control_room as CR  # noqa: E402  (agents, skills, hooks, health, plugins and MCP)
 import agent_files as AF  # noqa: E402  (view/edit the markdown that steers your agents)
 
@@ -142,21 +143,11 @@ def check_id(jid):
 
 
 # --------------------------------------------------------------------------- jobs.json
-class JobsLock(object):
-    """Cross-process lock (the run script's one-shot disabler takes the same flock)."""
+class JobsLock(W.jobs_lock):
+    """Cross-process lock shared with `chronos api apply` and the run script's one-shot disabler (chronos_write.jobs_lock)."""
 
-    def __enter__(self):
-        LOCK.acquire()
-        self.fh = open(JOBS_FILE + ".lock", "a")
-        fcntl.flock(self.fh, fcntl.LOCK_EX)
-        return self
-
-    def __exit__(self, *a):
-        try:
-            fcntl.flock(self.fh, fcntl.LOCK_UN)
-            self.fh.close()
-        finally:
-            LOCK.release()
+    def __init__(self):
+        W.jobs_lock.__init__(self, CFG)
 
 
 def load_jobs():
@@ -164,19 +155,18 @@ def load_jobs():
 
 
 def save_jobs(jobs):
-    """Snapshot the current file into history/jobs/, then replace atomically. Caller holds JobsLock."""
-    for j in jobs:
-        try:
-            C.validate_job_record(j)
-        except ValueError as e:
-            raise ApiError(400, str(e))
-    cur = read_text(JOBS_FILE, "")
-    if cur.strip():
-        os.makedirs(os.path.join(HISTORY_DIR, "jobs"), exist_ok=True)
-        p = unique_path(os.path.join(HISTORY_DIR, "jobs"), stamp(), ".json")
-        with open(p, "w", encoding="utf-8") as fh:
-            fh.write(cur)
-    atomic_write(JOBS_FILE, json.dumps(jobs, indent=2, ensure_ascii=False) + "\n")
+    """Snapshot the current file into history/jobs/, then replace atomically (chronos_write.write_jobs). Caller holds JobsLock."""
+    try:
+        W.write_jobs(CFG, jobs)
+    except W.WriteError as e:
+        raise ApiError(400, e.message)
+
+
+def approve_after_edit(job, was_clean):
+    """A web-UI save is an approval (the UI is token-gated at the Mac). But an edit to a job that was ALREADY held (changed
+    outside) must not quietly approve what changed outside: that takes the explicit 'Approve as it is on disk'."""
+    if was_clean:
+        W.approve(CFG, job, "ui")
 
 
 def find_job(jobs, jid):
@@ -364,6 +354,9 @@ def describe_job(job, detail=False):
     runs = runs_for(jid, 12 if not detail else 60)
     out["latest_log"] = next((r for r in runs if r["kind"] == "log"), None)
     out["latest_report"] = next((r for r in runs if r["kind"] == "report"), None)
+    out["changed_outside"] = C.changed_outside(CFG, job)
+    out["held"] = C.is_held(CFG, job)
+    out["approval_required"] = CFG["approval_required"]
     out["has_prompt"] = os.path.isfile(C.prompt_file(CFG, jid)) or C.is_command(job)
     out["has_guard"] = os.path.isfile(C.guard_file(CFG, jid))
     if detail:
@@ -466,8 +459,9 @@ def write_prompt(jid, content, base_sha):
         raise ApiError(413, "prompt.md is too large (200 KB max)")
     if "\x00" in content:
         raise ApiError(400, "binary content refused")
-    with LOCK:
-        if C.is_command(find_job(load_jobs(), jid)):
+    with LOCK, JobsLock():
+        job_rec = find_job(load_jobs(), jid)
+        if C.is_command(job_rec):
             raise ApiError(409, "this is a command job: it runs a shell command and has no prompt")
         path = C.prompt_file(CFG, jid)
         if not os.path.isdir(os.path.join(JOBS_DIR, jid)):
@@ -481,6 +475,7 @@ def write_prompt(jid, content, base_sha):
             return {"saved": False, "unchanged": True, "sha": sha(content)}
         snap = snapshot_text(jid, cur, "prompt.md") if cur is not None else None
         atomic_write(path, content)
+        W.approve(CFG, job_rec, "ui")                  # the person saving this text is approving it
         return {"saved": True, "sha": sha(content), "snapshot": os.path.basename(snap) if snap else None}
 
 
@@ -499,6 +494,7 @@ def update_schedule(jid, body):
     with JobsLock():
         jobs = load_jobs()
         job = find_job(jobs, jid)
+        was_clean = not C.changed_outside(CFG, job)
         if C.clock_on(job):
             merged = {k: job.get(k) for k in ("time", "days", "once", "catchup_min")}
             for k in ("time", "days", "once", "catchup_min"):
@@ -528,8 +524,8 @@ def update_schedule(jid, body):
             if body["notify"] not in C.NOTIFY_MODES:
                 raise ApiError(422, "notify must be one of: " + ", ".join(C.NOTIFY_MODES))
             new["notify"] = body["notify"]
-        if new.get("once"):
-            new["in_session"] = False
+        if new.get("once") and CFG["session_runner"] != "talos":
+            new["in_session"] = False                  # one-shots may be session jobs only when an external runner (talos) takes them
         changed = any(new.get(k) != job.get(k) for k in set(new) | set(job) if k != "updated")
         if not changed:
             return {"changed": False, "job": describe_job(job)}
@@ -537,6 +533,7 @@ def update_schedule(jid, body):
         job.clear()
         job.update(new)
         save_jobs(jobs)
+        approve_after_edit(job, was_clean)
         return {"changed": True, "warning": "", "job": describe_job(job)}
 
 
@@ -582,6 +579,7 @@ def update_triggers(jid, body):
     with JobsLock():
         jobs = load_jobs()
         job = find_job(jobs, jid)
+        was_clean = not C.changed_outside(CFG, job)
         if C.is_command(job):
             raise ApiError(409, "a command job runs on its clock schedule only and cannot have triggers")
         if job.get("once") and clean:
@@ -606,6 +604,7 @@ def update_triggers(jid, body):
             job.clear()
             job.update(new)
             save_jobs(jobs)
+            approve_after_edit(job, was_clean)
     if any(t["type"] == "webhook" for t in clean):
         TR.ensure_secret(CFG, jid)
     else:
@@ -650,6 +649,7 @@ def update_model(jid, body):
     with JobsLock():
         jobs = load_jobs()
         job = find_job(jobs, jid)
+        was_clean = not C.changed_outside(CFG, job)
         if C.is_command(job):
             raise ApiError(409, "a command job does not use Claude, so it has no model")
         if (job.get("model") or None) == m:
@@ -660,6 +660,7 @@ def update_model(jid, body):
             job.pop("model", None)
         job["updated"] = iso(now())
         save_jobs(jobs)
+        approve_after_edit(job, was_clean)
     return {"changed": True, "job": describe_job(job)}
 
 
@@ -688,6 +689,17 @@ def set_pause_all(paused):
         except FileNotFoundError:
             pass
     return {"paused_all": os.path.exists(PAUSE_ALL)}
+
+
+def approve_on_disk(jid):
+    """'Approve as it is on disk' for a held job: token-gated, goes through the shared writer, record via:'ui'."""
+    check_id(jid)
+    find_job(load_jobs(), jid)
+    try:
+        r = W.approve_on_disk(CFG, jid, "ui")
+    except W.WriteError as e:
+        raise ApiError(404 if e.code == "not_found" else 400, e.message)
+    return {"approved": True, "content_hash": r["content_hash"], "job": describe_job(find_job(load_jobs(), jid))}
 
 
 def run_now(jid, again):
@@ -744,16 +756,10 @@ def create_job(body):
         job.update({"time": clean["time"], "days": clean["days"], "catchup_min": clean["catchup_min"],
                     "enabled": True, "in_session": bool(body.get("in_session")) and mode == "recurring",
                     "notify": notify, "once": clean.get("once"), "created": stamp_now, "updated": stamp_now})
-        tdir = os.path.join(JOBS_DIR, jid)
-        os.makedirs(JOBS_DIR, exist_ok=True)
-        os.mkdir(tdir)
         try:
-            atomic_write(os.path.join(tdir, "prompt.md"), prompt + "\n", 0o644)
-            jobs.append(job)
-            save_jobs(jobs)
-        except Exception:
-            shutil.rmtree(tdir, ignore_errors=True)
-            raise
+            W.execute(CFG, {"op": "create", "id": jid, "new": job, "prompt": (prompt + "\n").encode("utf-8")}, jobs, "ui")
+        except W.WriteError as e:
+            raise ApiError(409 if e.code == "schedule_conflict" else 400, e.message)
     return {"created": True, "job": describe_job(job)}
 
 
@@ -763,22 +769,10 @@ def delete_job(jid):
     with JobsLock():
         jobs = load_jobs()
         find_job(jobs, jid)
-        tdir = os.path.join(JOBS_DIR, jid)
-        arch = os.path.join(HISTORY_DIR, "deleted", "%s-%s" % (jid, stamp()))
-        if os.path.isdir(tdir):
-            os.makedirs(arch, exist_ok=True)
-            for n in ("prompt.md", "guard.md"):
-                if os.path.isfile(os.path.join(tdir, n)):
-                    shutil.copy2(os.path.join(tdir, n), os.path.join(arch, n))
-            shutil.rmtree(tdir)
-        jobs[:] = [j for j in jobs if j.get("id") != jid]
-        save_jobs(jobs)
         try:
-            os.remove(os.path.join(PAUSED_DIR, jid))
-        except OSError:
-            pass
-    TR.delete_secret(CFG, jid)
-    TR.clear_queue(CFG, jid)
+            arch = W.delete_files(CFG, jid, jobs)
+        except W.WriteError as e:
+            raise ApiError(400, e.message)
     return {"deleted": True, "archive": arch}
 
 
@@ -1145,6 +1139,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, hook_secret(jid, bool(body.get("rotate"))))
         if action == "model":
             return self._json(200, update_model(jid, body))
+        if action == "approve":
+            return self._json(200, approve_on_disk(jid))
         if action == "run":
             return self._json(202, run_now(jid, bool(body.get("again"))))
         if action == "pause":
