@@ -98,6 +98,8 @@ def main(argv):
             sys.stderr.write("%s\n" % e)
             return 1
     elif cmd == "triggers":
+        if os.environ.get("CHRONOS_TEST_BLOCK_FIFO_TRIGGERS"):   # tests only, like CHRONOS_TEST_BLOCK_FIFO above
+            open(os.environ["CHRONOS_TEST_BLOCK_FIFO_TRIGGERS"], "rb").read()
         return TR.run_tick(cfg, dry="--dry" in args)
     elif cmd == "today":
         print(C.day_str(C.now().date()))
