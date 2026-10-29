@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "unknown_verb",
+    "message": "unknown api verb 'frobnicate'",
+    "fields": []
+  }
+}

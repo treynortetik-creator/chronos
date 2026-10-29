@@ -1,0 +1,23 @@
+{
+  "ok": true,
+  "normalized": {
+    "op": "update",
+    "id": "daily-digest",
+    "base_etag": "sha256:6ef39860b6bad511cf9bea36bf55a41c0b36e4993fb03592f44469e59e2929dd",
+    "set": {
+      "name": "Morning Digest",
+      "catchup_min": 120,
+      "prompt": "Summarise yesterday's activity.\n"
+    }
+  },
+  "preview": {
+    "when_text": "Weekdays at 7:30 AM",
+    "next_runs": [
+      "2026-10-06T07:30:00-04:00",
+      "2026-10-07T07:30:00-04:00",
+      "2026-10-08T07:30:00-04:00"
+    ],
+    "tz": "America/New_York"
+  },
+  "expected_etag": "sha256:ff7b74aeb076521807978c42b709c579d8543ea6eab8d50f54c7eff309a89908"
+}

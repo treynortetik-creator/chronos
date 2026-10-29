@@ -1,0 +1,33 @@
+{
+  "ok": true,
+  "normalized": {
+    "op": "create",
+    "draft": {
+      "id": "daily-digest",
+      "name": "Daily Digest",
+      "description": "Example job",
+      "when": {
+        "type": "weekdays",
+        "time": "07:30"
+      },
+      "catchup_min": 180,
+      "enabled": true,
+      "runner": "session",
+      "permissions": "full",
+      "allowed_tools": [],
+      "model": null,
+      "notify": "failure",
+      "prompt": "Summarise yesterday's activity and post it.\n"
+    }
+  },
+  "preview": {
+    "when_text": "Weekdays at 7:30 AM",
+    "next_runs": [
+      "2026-10-06T07:30:00-04:00",
+      "2026-10-07T07:30:00-04:00",
+      "2026-10-08T07:30:00-04:00"
+    ],
+    "tz": "America/New_York"
+  },
+  "expected_etag": "sha256:6ef39860b6bad511cf9bea36bf55a41c0b36e4993fb03592f44469e59e2929dd"
+}

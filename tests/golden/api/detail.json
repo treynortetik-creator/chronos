@@ -1,0 +1,44 @@
+{
+  "schedule": {
+    "id": "daily-digest",
+    "name": "Daily Digest",
+    "description": "Example job",
+    "kind": "claude",
+    "when": {
+      "type": "weekdays",
+      "time": "07:30"
+    },
+    "when_text": "Weekdays at 7:30 AM",
+    "catchup_min": 180,
+    "enabled": true,
+    "paused": false,
+    "runner": "session",
+    "permissions": "full",
+    "allowed_tools": [],
+    "model": null,
+    "notify": "failure",
+    "triggers_count": 0,
+    "next_run": "2026-10-06T07:30:00-04:00",
+    "today": "waiting",
+    "ds": "2026-10-05",
+    "window_ends": "2026-10-05T10:30:00-04:00",
+    "last_run": null,
+    "prompt_preview": "Summarise yesterday's activity and post it.\n",
+    "prompt_bytes": 44,
+    "editable": true,
+    "read_only_reason": null,
+    "changed_outside": false,
+    "etag": "sha256:6ef39860b6bad511cf9bea36bf55a41c0b36e4993fb03592f44469e59e2929dd",
+    "content_hash": "sha256:1cb006f0940c7c8df6c59c9abc31614ec33b80b745d773f28efb8ebb457e42a4",
+    "state_rev": "sha256:8b7925b9f5f9c6420b7fbcb30ed8a2a72a7769582f78d8b39a2c271b8e7c9714"
+  },
+  "prompt": "Summarise yesterday's activity and post it.\n",
+  "prompt_truncated": false,
+  "guard": null,
+  "next_runs": [
+    "2026-10-06T07:30:00-04:00",
+    "2026-10-07T07:30:00-04:00",
+    "2026-10-08T07:30:00-04:00"
+  ],
+  "runs": []
+}

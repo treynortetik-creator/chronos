@@ -1,0 +1,12 @@
+{
+  "error": {
+    "code": "schedule_conflict",
+    "message": "the job changed since it was read (stale base_etag)",
+    "fields": [
+      {
+        "path": "base_etag",
+        "message": "stale"
+      }
+    ]
+  }
+}
