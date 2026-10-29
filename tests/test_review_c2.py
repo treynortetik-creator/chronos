@@ -29,7 +29,14 @@ def launches(e):
 
 
 def kill_tree_of(e):
-    subprocess.run(["pkill", "-f", e.tmp], capture_output=True)
+    # Kill by PID only: list the processes under this test's own temp dir, then signal each PID.
+    r = subprocess.run(["pgrep", "-f", e.tmp], capture_output=True, text=True)
+    for pid in r.stdout.split():
+        if pid.isdigit() and int(pid) != os.getpid():
+            try:
+                os.kill(int(pid), signal.SIGTERM)
+            except ProcessLookupError:
+                pass
 
 
 class R1StaleSweepDoubleFiresALiveRun(unittest.TestCase):
