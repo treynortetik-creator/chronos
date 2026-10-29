@@ -847,9 +847,9 @@ def probe(cfg, at=None):
     """Retry background runs. Clears headless.blocked, then runs `claude -p "Reply with the word OK." --max-turns 1` as a one-off launchd job
     (launchctl submit) in the workspace with CHRONOS_RUN=1: the same binary lookup, flags and plugin settings as a real run, and launchd's
     own environment, which is the whole point (a shell test proves nothing about launchd). OK keeps the block cleared; silence re-trips it.
-    $CHRONOS_LAUNCHCTL replaces the launchctl binary (the tests use a stand-in; nothing else reads it)."""
+    $CHRONOS_LAUNCHCTL replaces the launchctl binary, but only with CHRONOS_TEST_MODE=1 (the tests use a stand-in)."""
     at = at or C.now()
-    launchctl = os.environ.get("CHRONOS_LAUNCHCTL") or "launchctl"
+    launchctl = C.test_seam("CHRONOS_LAUNCHCTL") or "launchctl"
     old = read_block(cfg) or {}
     os.makedirs(cfg["home_dir"], exist_ok=True)
     for n in os.listdir(cfg["home_dir"]):                       # scratch dirs of probes that were killed before they could clean up

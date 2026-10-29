@@ -55,8 +55,8 @@ def main(argv):
     if cmd == "env":
         print(C.shell_env(cfg))
     elif cmd == "due":
-        if os.environ.get("CHRONOS_TEST_BLOCK_FIFO"):   # tests only: block in the kernel like a stuck privacy check does
-            open(os.environ["CHRONOS_TEST_BLOCK_FIFO"], "rb").read()
+        if C.test_seam("CHRONOS_TEST_BLOCK_FIFO"):   # tests only: block in the kernel like a stuck privacy check does
+            open(C.test_seam("CHRONOS_TEST_BLOCK_FIFO"), "rb").read()
         try:
             due = C.due_jobs(cfg)
         except RuntimeError as e:
@@ -91,8 +91,8 @@ def main(argv):
             sys.stderr.write("%s\n" % e)
             return 1
     elif cmd == "prompt" and args:
-        if os.environ.get("CHRONOS_TEST_BLOCK_FIFO_RUN"):   # tests only, like CHRONOS_TEST_BLOCK_FIFO above: the run script's prompt step blocks in the kernel
-            open(os.environ["CHRONOS_TEST_BLOCK_FIFO_RUN"], "rb").read()
+        if C.test_seam("CHRONOS_TEST_BLOCK_FIFO_RUN"):   # tests only, like CHRONOS_TEST_BLOCK_FIFO above: the run script's prompt step blocks in the kernel
+            open(C.test_seam("CHRONOS_TEST_BLOCK_FIFO_RUN"), "rb").read()
         sys.stdout.write(C.build_prompt(cfg, args[0], args[1] if len(args) > 1 else None))
     elif cmd == "jobenv" and args:
         try:
@@ -101,8 +101,8 @@ def main(argv):
             sys.stderr.write("%s\n" % e)
             return 1
     elif cmd == "triggers":
-        if os.environ.get("CHRONOS_TEST_BLOCK_FIFO_TRIGGERS"):   # tests only, like CHRONOS_TEST_BLOCK_FIFO above
-            open(os.environ["CHRONOS_TEST_BLOCK_FIFO_TRIGGERS"], "rb").read()
+        if C.test_seam("CHRONOS_TEST_BLOCK_FIFO_TRIGGERS"):   # tests only, like CHRONOS_TEST_BLOCK_FIFO above
+            open(C.test_seam("CHRONOS_TEST_BLOCK_FIFO_TRIGGERS"), "rb").read()
         return TR.run_tick(cfg, dry="--dry" in args)
     elif cmd == "today":
         print(C.day_str(C.now().date()))

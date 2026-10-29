@@ -65,6 +65,16 @@ export CHRONOS_JOB="$id" CHRONOS_LOG="$LOG" CHRONOS_REPORT="$REPORT"
 
 notify() { CHRONOS_EVENT="$1" ch_step "${CH_STEP_DEADLINE_S:-60}" notify "$DIR/chronos-notify" "$2" >/dev/null 2>&1 || true; }     # a notify command is a network call: bounded, from outside
 release_claim() { rm -f "$CLAIM.owner.json"; rmdir "$CLAIM" 2>/dev/null; }     # the sibling owner file goes before the directory
+# N1: a step of this script killed at its deadline (rc 137) is a launch stall, not a failed job: the day gets `stalled-` (terminal for the tick),
+# headless is blocked, and the owner reruns by hand. No automatic retry.
+stall_early() {
+  echo "$(date '+%F %T') STALLED $id $1"
+  [ -z "$EVENT" ] && touch "$CH_STATE/stalled-$id-$D"
+  chx runlog stall --id "$id" --ds "$D" --run-id "${RUN_ID:-}" ${EVENT:+--hash "$EHASH"} >/dev/null 2>&1 || true
+  [ -e "$CH_HOME/headless.blocked" ] || printf '{"reason":"launch_stalled","id":"%s","ds":"%s","source":"watchdog","tcc_suspected":false}\n' "$id" "$D" > "$CH_HOME/headless.blocked" 2>/dev/null
+  [ "${MODE:-failure}" = "never" ] || notify job_stalled "Chronos: $id could not start: a step of the run timed out ($1), usually a macOS privacy prompt nobody can see. Background runs are paused until you retry them."
+  release_claim; exit 1
+}
 fail_early() { echo "$(date '+%F %T') FAIL $id $1"; [ -z "$EVENT" ] && touch "$FAILED"; release_claim; exit 1; }
 
 # a failed or stalled day is terminal for every automatic start; only Run now (which clears the marker before it spawns us) re-runs it
@@ -103,16 +113,16 @@ if [ "$KIND" = command ]; then
   :
 elif [ -n "$EVENT" ]; then
   [ -f "$EVFILE" ] || fail_early "event file unreadable: $EVFILE"
-  PROMPT="$(chx prompt "$id" --event "$EVFILE" "$ETYPE")" || fail_early "cannot build the event prompt"
+  PROMPT="$(chx prompt "$id" --event "$EVFILE" "$ETYPE")" || { [ $? -eq 137 ] && stall_early "event prompt"; fail_early "cannot build the event prompt"; }
 else
-  PROMPT="$(chx prompt "$id" "$D")" || fail_early "cannot build prompt"
+  PROMPT="$(chx prompt "$id" "$D")" || { [ $? -eq 137 ] && stall_early "prompt"; fail_early "cannot build prompt"; }
 fi
 MODE="$(chx field "$id" notify)"
 # per-job settings: CH_JOB_MODEL and, for events, CH_EV_ALLOWED / CH_EV_TOOLS / CH_EV_DENY / CH_EV_MCP.
 # A job that cannot be read is a failure; nothing falls back to a wider tool list.
 CH_JOB_MODEL=""; CH_RESTRICTED=0; CH_RSETTINGS=""
 if [ "$KIND" != command ]; then
-  JOBENV="$(chx jobenv "$id")" || fail_early "cannot read the job's settings"
+  JOBENV="$(chx jobenv "$id")" || { [ $? -eq 137 ] && stall_early "job settings"; fail_early "cannot read the job's settings"; }
   eval "$JOBENV"
 fi
 

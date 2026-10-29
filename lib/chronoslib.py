@@ -35,7 +35,7 @@ import shlex
 import sys
 import time
 
-VERSION = "0.3.0-rc1"
+VERSION = "0.3.0"
 API_VERSION = 1                      # `chronos api version` -> {"api": 1, ...}; the same major means compatible
 CHRONOS_API_VERSION = VERSION        # what `chronos api version` reports as "chronos"
 SESSION_RUNNERS = ("hook", "talos")
@@ -268,6 +268,19 @@ def clock_on(job):
 
 def job_notify_mode(job):
     return job.get("notify") if job.get("notify") in NOTIFY_MODES else "failure"
+
+
+# --------------------------------------------------------------------------- test-only settings
+def test_seam(name):
+    """The value of a test-only environment variable, but only when CHRONOS_TEST_MODE=1 is set too. Otherwise it is ignored, with a
+    warning on stderr, so a stray variable in a real environment can never redirect launchctl or block a step."""
+    v = os.environ.get(name)
+    if not v:
+        return ""
+    if os.environ.get("CHRONOS_TEST_MODE") == "1":
+        return v
+    sys.stderr.write("chronos: %s is a test-only setting and was ignored (CHRONOS_TEST_MODE=1 enables it)\n" % name)
+    return ""
 
 
 # --------------------------------------------------------------------------- clock
