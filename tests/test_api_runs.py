@@ -191,6 +191,11 @@ class Finish(Base):
         self.assertEqual([r["status"] for r in self.rows() if r.get("run_id") == RID1], ["session_ended"])
         self.assertIn("I did finish after all", open(self.p("reports", "morning-%s-%s.late.md" % (DS, RID1))).read())      # kept as the late note
 
+    def test_finish_never_closes_a_headless_run(self):
+        self.claim(claim_req(runner="headless", bridge_instance=""))
+        self.assertEqual(self.finish(), {"ok": False, "reason": "not_owner"})
+        self.assertTrue(os.path.isdir(self.p("claim-morning-" + DS)))
+
     def test_run_id_is_only_a_lookup_key(self):
         self.claim()
         r = api(self.e, ["finish", "morning"], {"run_id": "../../etc/passwd", "status": "ok", "report": "x"}, now=NOW, expect=1)[1]

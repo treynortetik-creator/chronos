@@ -91,6 +91,7 @@ DEFAULTS = {
     "step_deadline_s": 60,                       # the tick kills any one of its Python steps after this long (kill -9, from outside the process)
     "trigger_deadline_s": 150,                   # same, for the event (trigger) pass
     "launch_timeout_s": 180,                     # a headless run with no output and no CPU progress this long after launch is a launch stall: killed, `stalled-` marker, headless.blocked
+    "env_pass": [],                              # extra environment variable names (or PREFIX*) a spawned run keeps; by default only the basics, CHRONOS_*, ANTHROPIC_* and CLAUDE_*
     "probe_timeout_s": 120,                      # `chronos api probe` waits this long for the one-off launchd job to answer
     # ---- v0.2.0: Control Room
     "claude_home": "~/.claude",                  # where the Control Room reads user-level settings, agents and skills
@@ -128,6 +129,8 @@ def load_config():
         cfg[k] = os.path.abspath(os.path.expanduser(str(cfg[k])))
     cfg["kill_switch_dir"] = os.path.abspath(os.path.expanduser(str(cfg["kill_switch_dir"] or os.path.join(cfg["home_dir"], "switches"))))
     cfg["path"] = [os.path.expanduser(str(x)) for x in (cfg["path"] or [])]
+    if not isinstance(cfg["env_pass"], list):
+        cfg["env_pass"] = []
     for k in ("event_allowed_tools", "event_deny", "hook_hosts", "model_denylist", "health_checks", "agent_files_extra", "agent_files_exclude"):
         if not isinstance(cfg[k], list):
             cfg[k] = list(DEFAULTS[k])
@@ -594,6 +597,21 @@ def remove_claim(cp):
         pass
 
 
+def proc_start(pid):
+    """The start-time string `ps` reports for a pid ('' if there is no such process). A recycled pid has a different one."""
+    import subprocess
+    try:
+        r = subprocess.run(["ps", "-o", "lstart=", "-p", str(int(pid))], capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return ""
+
+
+def proc_alive(pid, start=None):
+    cur = proc_start(pid)
+    return bool(cur) and (not start or cur == start)
+
+
 def sweep_stale_claim(cfg, cp, at=None):
     """Remove a claim (and its owner file) that belongs to a run that died. Age is measured from the owner file's `claimed_at`
     against the scheduler's clock when there is one, otherwise from the directory's mtime. True when it swept."""
@@ -603,7 +621,10 @@ def sweep_stale_claim(cfg, cp, at=None):
     age = None
     try:
         with open(cp + ".owner.json", encoding="utf-8") as fh:
-            t = datetime.datetime.fromisoformat(json.load(fh)["claimed_at"])
+            own = json.load(fh)
+        if own.get("pid") and proc_alive(own["pid"], own.get("pid_start")):
+            return False                 # the run script that owns this claim is still alive (a sleeping Mac moves the clock, not the run)
+        t = datetime.datetime.fromisoformat(own["claimed_at"])
         if t.tzinfo is not None:
             t = t.astimezone(zone_info()).replace(tzinfo=None)
         age = (at - t).total_seconds()
@@ -662,33 +683,38 @@ def due_jobs(cfg, at=None):
                 continue            # session-only (S2.1): the live session takes it; the tick NEVER spawns it
             jid = j["id"]
             win = int(j.get("catchup_min", 180))
+            slots = []                  # (fire datetime, grace, ds): the one-shot's own date, or yesterday's and today's fire (the midnight rule, S7.5)
             if j.get("once"):
-                f, grace = fire_dt(j, at.date()), 0
-                if not (f <= at < f + datetime.timedelta(minutes=win)):
-                    continue
+                slots.append((fire_dt(j, at.date()), 0, date_key(j, at)))
             else:
-                if not is_due_day(j, at.date()):
-                    continue
-                f, grace = fire_dt(j, at.date()), cfg["grace_min"]
+                for d in (at.date() - datetime.timedelta(days=1), at.date()):
+                    if is_due_day(j, d):
+                        slots.append((fire_dt(j, d), cfg["grace_min"], day_str(d)))
+            for f, grace, ds in slots:
                 if not (f + datetime.timedelta(minutes=grace) <= at < f + datetime.timedelta(minutes=win)):
                     continue
-            ds = date_key(j, at)
-            if is_paused(cfg, jid) or os.path.exists(ran_path(cfg, jid, ds)) or os.path.exists(failed_path(cfg, jid, ds)):
-                continue
-            if os.path.exists(stalled_path(cfg, jid, ds)):
-                continue            # N5: a stalled (id, ds) is terminal for the tick, block or no block. Only Run now clears it.
-            if os.path.exists(cfg["blocked_file"]) and not is_command(j):
-                continue            # headless.blocked: no headless Claude runs until Retry clears it; command jobs still run
-            if not is_command(j) and not os.path.isfile(prompt_file(cfg, jid)):
-                sys.stderr.write("skip %s: %s missing\n" % (jid, prompt_file(cfg, jid)))
-                continue
-            if is_held(cfg, j):
-                sys.stderr.write("skip %s: HELD (its content differs from the approved record)\n" % jid)
-                continue
-            out.append((jid, ds))
+                if _due_ds(cfg, j, jid, ds):
+                    out.append((jid, ds))
         except Exception as e:
             sys.stderr.write("skip job %r: %s\n" % (j.get("id") if isinstance(j, dict) else j, e))
     return out
+
+
+def _due_ds(cfg, j, jid, ds):
+    """The per-(job, ds) gates of due_jobs."""
+    if is_paused(cfg, jid) or os.path.exists(ran_path(cfg, jid, ds)) or os.path.exists(failed_path(cfg, jid, ds)):
+        return False
+    if os.path.exists(stalled_path(cfg, jid, ds)):
+        return False            # N5: a stalled (id, ds) is terminal for the tick, block or no block. Only Run now clears it.
+    if os.path.exists(cfg["blocked_file"]) and not is_command(j):
+        return False            # headless.blocked: no headless Claude runs until Retry clears it; command jobs still run
+    if not is_command(j) and not os.path.isfile(prompt_file(cfg, jid)):
+        sys.stderr.write("skip %s: %s missing\n" % (jid, prompt_file(cfg, jid)))
+        return False
+    if is_held(cfg, j):
+        sys.stderr.write("skip %s: HELD (its content differs from the approved record)\n" % jid)
+        return False
+    return True
 
 
 def job_is_due_today(job, at):
@@ -697,7 +723,7 @@ def job_is_due_today(job, at):
 
 
 # --------------------------------------------------------------------------- claim / done
-def claim(cfg, jid, unattended=False, at=None):
+def claim(cfg, jid, unattended=False, at=None, ds=None):
     """Atomic claim. Returns CLAIMED, ALREADY_DONE, RUNNING_ELSEWHERE, NOT_DUE, HELD (approval_required and the job's content
     is not what was approved) or NO_SUCH_JOB.
 
@@ -716,12 +742,14 @@ def claim(cfg, jid, unattended=False, at=None):
         return "NOT_DUE"
     if is_held(cfg, job):
         return "HELD"
-    ds = date_key(job, at)
+    ds = ds if (ds and re.match(r"^\d{4}-\d{2}-\d{2}$", ds)) else date_key(job, at)     # the tick passes the ds `due` printed (yesterday's, after midnight)
     os.makedirs(cfg["state_dir"], exist_ok=True)
     cp = claim_path(cfg, jid, ds)
     sweep_stale_claim(cfg, cp, at)
     if os.path.exists(ran_path(cfg, jid, ds)):
         return "ALREADY_DONE"
+    if os.path.exists(failed_path(cfg, jid, ds)) or os.path.exists(stalled_path(cfg, jid, ds)):
+        return "FAILED_TODAY"            # a failed or stalled day is terminal for the tick; only Run now (which clears the marker first) takes it
     try:
         os.mkdir(cp)
     except FileExistsError:
@@ -1131,6 +1159,22 @@ class RunError(Exception):
         self.status, self.msg, self.extra = status, msg, extra
 
 
+ENV_KEEP = ("HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "TZ", "PATH", "CHRONOS_CONFIG")
+ENV_KEEP_PREFIX = ("LC_", "CHRONOS_", "ANTHROPIC_", "CLAUDE_")
+
+
+def scrubbed_env(cfg, extra=None):
+    """The environment a spawned run gets: the basics, Chronos's own variables and what the claude CLI itself reads. Nothing else of the
+    caller's (a bridge's relay token, a shell's keys) reaches a `claude -p --dangerously-skip-permissions` run. `env_pass` adds more."""
+    pass_names = [str(x) for x in (cfg.get("env_pass") or [])]
+    out = {}
+    for k, v in os.environ.items():
+        if k in ENV_KEEP or k.startswith(ENV_KEEP_PREFIX) or any((k == n) or (n.endswith("*") and k.startswith(n[:-1])) for n in pass_names):
+            out[k] = v
+    out.update(extra or {})
+    return out
+
+
 def start_run(cfg, jid, again=False):
     """Take the claim and spawn bin/chronos-run.sh detached, exactly like the tick does."""
     import subprocess
@@ -1143,6 +1187,10 @@ def start_run(cfg, jid, again=False):
         raise RunError(409, "this job has no prompt.md, so there is nothing to run")
     if is_held(cfg, job):
         raise RunError(409, "this job is HELD: its prompt or settings differ from what was approved. Approve it as it is on disk first", held=True)
+    if job.get("headless") is False:
+        raise RunError(409, "this job runs in your live session only; it has no background run")
+    if os.path.exists(cfg["blocked_file"]) and not is_command(job):
+        raise RunError(409, "background runs are blocked after a launch stall. Retry them first (chronos api probe)", blocked=True)
     try:
         check_restricted_field(job)
         if job.get("restricted") is True and job.get("in_session") is True:
@@ -1156,10 +1204,11 @@ def start_run(cfg, jid, again=False):
         if not again:
             raise RunError(409, "This job already ran today. Run it again?", need_confirm=True)
         os.remove(ran)
-    try:
-        os.remove(failed_path(cfg, jid, ds))
-    except FileNotFoundError:
-        pass
+    for marker in (failed_path(cfg, jid, ds), stalled_path(cfg, jid, ds)):
+        try:
+            os.remove(marker)
+        except FileNotFoundError:
+            pass
     os.makedirs(cfg["state_dir"], exist_ok=True)
     os.makedirs(cfg["logs_dir"], exist_ok=True)
     cp = claim_path(cfg, jid, ds)
@@ -1173,7 +1222,7 @@ def start_run(cfg, jid, again=False):
         logf.write("%s CLAIMED %s -> spawning run (manual)\n" % (time.strftime("%F %T"), jid))
         logf.flush()
         subprocess.Popen(["/bin/bash", run_script, jid, ds], stdin=subprocess.DEVNULL, stdout=logf,
-                         stderr=subprocess.STDOUT, start_new_session=True, cwd=HOME)
+                         stderr=subprocess.STDOUT, start_new_session=True, cwd=HOME, env=scrubbed_env(cfg))
         logf.close()
     except Exception as e:
         try:
@@ -1213,6 +1262,8 @@ def record_content_hash(record, prompt_bytes, guard_bytes):
     sub = {"kind": record.get("kind") or "claude", "command": record.get("command"), "restricted": record.get("restricted") is True,
            "allowed_tools": record.get("allowed_tools"), "model": record.get("model") or None,
            "in_session": record.get("in_session") is True, "headless": record.get("headless") is not False}
+    if record.get("triggers"):
+        sub["triggers"] = record["triggers"]       # a trigger is a way to start the job: a hand-added one must hold it (a job without any hashes as before)
     return sha256_ref(canon(sub) + b"\0" + prompt_bytes + b"\0" + guard_bytes)
 
 

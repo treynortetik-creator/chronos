@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """WP-C2: the tick. Session-only jobs are never spawned headless (review R1), a stalled (id, ds) is terminal, headless.blocked stops
 Claude runs but not command jobs, and the session-wait notification."""
+import datetime
 import os
 import subprocess
 import sys
@@ -140,6 +141,9 @@ class SessionWaitNotify(unittest.TestCase):
         self.e.cleanup()
 
     def tick(self, t, **kw):
+        prev = (datetime.datetime.fromisoformat(D + "T" + t) - datetime.timedelta(minutes=2)).isoformat()      # ticks come every 5 minutes: this is not the first tick after a sleep
+        os.makedirs(self.e.cfg["home_dir"], exist_ok=True)
+        open(self.e.cfg["beat_file"], "w").write(prev + "\n")
         r = self.e.run(["/bin/bash", TICK], CHRONOS_NOW=D + "T" + t, TZ=NY, **kw)
         time.sleep(0.8)
         return r

@@ -4,7 +4,7 @@
   chronos env                          shell assignments for the bash scripts
   chronos due [--dry]                  jobs the tick would start right now (id|date)
   chronos list                         every job, its schedule and next fire time
-  chronos claim <id> [--unattended]    atomic claim: CLAIMED | ALREADY_DONE | RUNNING_ELSEWHERE | NOT_DUE
+  chronos claim <id> [YYYY-MM-DD] [--unattended]   atomic claim: CLAIMED | ALREADY_DONE | FAILED_TODAY | RUNNING_ELSEWHERE | NOT_DUE
   chronos done <id>                    touch the done-marker and release the claim
   chronos release <id>                 release a claim without marking done
   chronos run <id> [--again]           start a job now, headless, in the background
@@ -70,7 +70,7 @@ def main(argv):
             print("%-24s %-34s %-9s next: %s" % (j["id"], C.english(j), "on" if j.get("enabled") else "disabled",
                                                  C.iso(nf[0]) if nf else "-"))
     elif cmd == "claim" and args:
-        res = C.claim(cfg, args[0], unattended="--unattended" in args)
+        res = C.claim(cfg, args[0], unattended="--unattended" in args, ds=next((a for a in args[1:] if len(a) == 10 and a[4] == "-"), None))
         print(res)
         return 0 if res == "CLAIMED" else 1
     elif cmd == "done" and args:

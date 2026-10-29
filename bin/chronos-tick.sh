@@ -26,7 +26,8 @@ ENVOUT="$(ch_step 60 env "$PYBIN" "$DIR/chronos" env)" || { echo "chronos: canno
 eval "$ENVOUT"
 mkdir -p "$CH_STATE" "$CH_LOGS" "$CH_HOME"
 DRY="${CHRONOS_DRYRUN:-}"
-[ -z "$DRY" ] && date "+%Y-%m-%dT%H:%M:%S" > "$CH_HOME/chronos.beat"
+PREV_BEAT=""; [ -f "$CH_HOME/chronos.beat" ] && PREV_BEAT="$(head -c 40 "$CH_HOME/chronos.beat" | tr -d '\n')"
+[ -z "$DRY" ] && { if [ -n "${CHRONOS_NOW:-}" ]; then echo "$CHRONOS_NOW" > "$CH_HOME/chronos.beat"; else date "+%Y-%m-%dT%H:%M:%S" > "$CH_HOME/chronos.beat"; fi; }
 
 DUE=$(ch_step "$CH_STEP_DEADLINE_S" due "$PYBIN" "$DIR/chronos" due 2>>"$CH_LOGS/chronos.log")
 RC=$?
@@ -43,7 +44,7 @@ while IFS='|' read -r id ds; do
   [ -n "$id" ] || continue
   if [ -n "$DRY" ]; then echo "DRYRUN would claim $id ($ds)"; continue; fi
   # claim: atomic mkdir, stale claims swept first (same rule as `chronos claim`)
-  [ "$(ch_step "$CH_STEP_DEADLINE_S" claim "$PYBIN" "$DIR/chronos" claim "$id")" = "CLAIMED" ] || continue
+  [ "$(ch_step "$CH_STEP_DEADLINE_S" claim "$PYBIN" "$DIR/chronos" claim "$id" "$ds")" = "CLAIMED" ] || continue
   echo "$(date '+%F %T') CLAIMED $id -> spawning run" >> "$CH_LOGS/chronos.log"
   nohup /bin/bash "$DIR/chronos-run.sh" "$id" "$ds" >> "$CH_LOGS/chronos.log" 2>&1 &
 done <<< "$DUE"
@@ -51,11 +52,12 @@ done <<< "$DUE"
 # ---- session-wait notifications (v0.3.0, S7.4). A session job that has waited session_wait_notify_min with no live session
 # is announced once per (id, ds) through the `notify` command, with CHRONOS_JOB exported so the command can pick the job's thread.
 if [ -z "$DRY" ]; then
-  WAITS=$(ch_step "$CH_STEP_DEADLINE_S" wait-notify "$PYBIN" "$DIR/chronos" runlog wait-notify 2>>"$CH_LOGS/chronos.log") || WAITS=""
+  WAITS=$(ch_step "$CH_STEP_DEADLINE_S" wait-notify "$PYBIN" "$DIR/chronos" runlog wait-notify --prev-beat "$PREV_BEAT" 2>>"$CH_LOGS/chronos.log") || WAITS=""
   while IFS='|' read -r wid wds wmsg; do
     [ -n "$wid" ] && [ -n "$wmsg" ] || continue
     echo "$(date '+%F %T') WAITING $wid ($wds): no live session; notifying" >> "$CH_LOGS/chronos.log"
-    CHRONOS_JOB="$wid" CHRONOS_EVENT=session_wait "$DIR/chronos-notify" "$wmsg" >/dev/null 2>&1 || true
+    # off the tick's critical path: a notify command is a network call. It runs in the background under its own kill -9 deadline.
+    ( CHRONOS_JOB="$wid" CHRONOS_EVENT=session_wait ch_step "$CH_STEP_DEADLINE_S" notify "$DIR/chronos-notify" "$wmsg" ) >/dev/null 2>&1 &
   done <<< "$WAITS"
 fi
 

@@ -49,6 +49,7 @@ EVFILE="${3:-}"; EHASH="${4:-}"; ETYPE="${5:-}"; EVENT=""
 case "$id" in ""|*[!a-z0-9-]*) echo "bad job id"; exit 1 ;; esac
 case "$EHASH" in *[!a-f0-9]*) echo "bad event hash"; exit 1 ;; esac
 case "$ETYPE" in *[!a-z]*) echo "bad event type"; exit 1 ;; esac
+case "$D" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) echo "bad date"; exit 1 ;; esac
 mkdir -p "$CH_STATE/reports" "$CH_LOGS"
 LOG="$CH_LOGS/$id-$D-$(date +%H%M).log"
 REPORT="$CH_STATE/reports/$id-$D.md"
@@ -62,17 +63,19 @@ fi
 POLL="${CHRONOS_POLL_S:-10}"   # watchdog poll interval (tests shorten it)
 export CHRONOS_JOB="$id" CHRONOS_LOG="$LOG" CHRONOS_REPORT="$REPORT"
 
-notify() { CHRONOS_EVENT="$1" "$DIR/chronos-notify" "$2" >/dev/null 2>&1 || true; }
+notify() { CHRONOS_EVENT="$1" ch_step "${CH_STEP_DEADLINE_S:-60}" notify "$DIR/chronos-notify" "$2" >/dev/null 2>&1 || true; }     # a notify command is a network call: bounded, from outside
 release_claim() { rm -f "$CLAIM.owner.json"; rmdir "$CLAIM" 2>/dev/null; }     # the sibling owner file goes before the directory
 fail_early() { echo "$(date '+%F %T') FAIL $id $1"; [ -z "$EVENT" ] && touch "$FAILED"; release_claim; exit 1; }
 
+# a failed or stalled day is terminal for every automatic start; only Run now (which clears the marker before it spawns us) re-runs it
+if [ -z "$EVENT" ] && { [ -e "$FAILED" ] || [ -e "$CH_STATE/stalled-$id-$D" ]; }; then echo "$(date '+%F %T') SKIP $id failed or stalled day"; release_claim; exit 0; fi
 # idempotent: a relaunch must never redo a finished job
 [ -f "$RAN" ] && { echo "$(date '+%F %T') SKIP $id already ran"; release_claim; exit 0; }
 [ -d "$CH_WORKSPACE" ] || fail_early "workspace missing: $CH_WORKSPACE"
 
 # v0.3.0: the run id (r_<ULID>; CHRONOS_RUN_ID when `chronos api start` already minted it) and, for a clock run, the claim's owner file
 TRIGGER="${CHRONOS_TRIGGER:-clock}"; [ -n "$EVENT" ] && TRIGGER=event
-RUN_ID="$(chx runlog open --id "$id" --ds "$D" --trigger-kind "$TRIGGER" ${EVENT:+--hash "$EHASH"})" || RUN_ID=""
+RUN_ID="$(chx runlog open --id "$id" --ds "$D" --trigger-kind "$TRIGGER" --pid "$$" ${EVENT:+--hash "$EHASH"})" || RUN_ID=""
 STATUS="$CH_STATE/run-$id-$D${EVENT:+-$EHASH}.json"
 STARTED="$(date '+%Y-%m-%dT%H:%M:%S%z' | sed -E 's/(..)$/:\1/')"
 write_status() {  # write_status <running|ok|failed|timed_out|launch_stalled>: atomic, refreshed on every watchdog poll
@@ -165,7 +168,7 @@ while kill -0 "$pid" 2>/dev/null; do
   BYTES="$sz"
   write_status running
   if [ -n "$LAUNCHWATCH" ] && [ -z "$SAWOUT" ] && [ "$IDLE" -ge "$CH_LAUNCH_TIMEOUT_S" ]; then
-    stalled=1; kids="$(pgrep -P "$pid" 2>/dev/null | tr '\n' ' ')"
+    stalled=1; kids="$(ch_tree "$pid" | tr '\n' ' ')"
     kill -TERM $kids "$pid" 2>/dev/null; sleep 1; kill -KILL $kids "$pid" 2>/dev/null; break
   fi
   if [ "$waited" -ge "$CH_TIMEOUT_S" ]; then

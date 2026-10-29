@@ -7,7 +7,9 @@ Run ids (`r_<ULID>`) in `runs.jsonl` with `ds`, `run_id`, `status` and `claude_p
 file (written tmp + rename, removed before every `rmdir`, swept with a stale claim). **Launch watchdog**: a headless run with no output and no CPU progress
 for `launch_timeout_s` is killed and becomes `stalled-` (terminal for the tick) with `headless.blocked`; `probe` is "Retry" (a one-off `launchctl submit`
 job; `CHRONOS_LAUNCHCTL` swaps the binary for tests). Every Python step of `chronos-run.sh` now runs under the external `kill -9` deadline. The tick sends the
-session-wait notification (talos only) and skips Claude runs while headless is blocked. New config: `launch_timeout_s`, `probe_timeout_s`.
+session-wait notification (talos only) and skips Claude runs while headless is blocked. New config: `launch_timeout_s`, `probe_timeout_s`, `env_pass`.
+
+Review fixes: a claim whose run script is alive (pid + start time in the owner file) is never swept, so a sleeping Mac cannot start a second copy; notify commands run under the external deadline and, from the tick, in the background; the trigger pass skips session-only jobs and `triggers` are part of `content_hash` when present; `chronos run` and the UI's Run now honour `headless:false` and `headless.blocked` and clear `stalled-`; `probe` keeps the block until it hears OK and its one-off job limits itself; `due` evaluates yesterday's fire and the tick claims that `ds`; a failed or stalled day is refused by `claim` and by the run script; spawned runs get a scrubbed environment; `finish` writes 0600 and never closes a headless run; no wait notice on the first tick after a sleep.
 
 ## 0.3.0-rc1 - unreleased
 

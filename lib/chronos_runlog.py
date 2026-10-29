@@ -332,11 +332,16 @@ def _write_json(path, obj, mode=0o600):
 
 
 def _write_text(path, text):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
     tmp = "%s.tmp.%d" % (path, os.getpid())
-    with open(tmp, "w", encoding="utf-8") as fh:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)          # 0600 whatever the caller's umask (a bridge runs with 022)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(text)
     os.replace(tmp, path)
+
+
+def _touch(path):
+    os.close(os.open(path, os.O_WRONLY | os.O_CREAT, 0o600))
 
 
 def run_report_path(cfg, jid, ds, run_id):
@@ -479,8 +484,9 @@ def claim_run(cfg, jid, req, at=None):
 
 # --------------------------------------------------------------------------- runs.jsonl rows
 def append_row(cfg, row):
-    os.makedirs(cfg["home_dir"], exist_ok=True)
-    with open(cfg["runs_file"], "a", encoding="utf-8") as fh:
+    os.makedirs(cfg["home_dir"], mode=0o700, exist_ok=True)
+    fd = os.open(cfg["runs_file"], os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
@@ -543,7 +549,7 @@ def finish_run(cfg, jid, req, at=None):
         if closed.get("job") == jid and DS_RE.match(str(closed.get("ds"))) and report:
             _write_text(os.path.join(cfg["reports_dir"], "%s-%s-%s.late.md" % (jid, closed["ds"], rid)), report)
         return {"ok": False, "reason": "late"}
-    mine = next(((i, ds, o) for i, ds, o in owners(cfg, jid) if o.get("run_id") == rid), None)
+    mine = next(((i, ds, o) for i, ds, o in owners(cfg, jid) if o.get("run_id") == rid and o.get("runner") == "session"), None)   # a headless run is never the bridge's to finish
     if mine is None:
         return {"ok": False, "reason": "not_owner"}
     _, ds, own = mine
@@ -552,7 +558,7 @@ def finish_run(cfg, jid, req, at=None):
         _write_text(C.report_path(cfg, jid, ds), report)     # the old per-day path stays a copy of the latest
     ok = status == "ok"
     os.makedirs(cfg["state_dir"], exist_ok=True)
-    open(C.ran_path(cfg, jid, ds) if ok else C.failed_path(cfg, jid, ds), "a").close()
+    _touch(C.ran_path(cfg, jid, ds) if ok else C.failed_path(cfg, jid, ds))
     started = _aware_to_local(own["claimed_at"]) if own.get("claimed_at") else at
     start_ts = int(C.localize(started).timestamp())
     end_ts = int(C.localize(at).timestamp())
@@ -633,7 +639,7 @@ def start_headless(cfg, jid, again=False, at=None):
     rid = new_run_id()
     try:
         write_owner(cfg, jid, ds, rid, "headless", at, manual=True, trigger="run_now")
-        env = dict(os.environ, CHRONOS_RUN_ID=rid, CHRONOS_TRIGGER="run_now")
+        env = C.scrubbed_env(cfg, {"CHRONOS_RUN_ID": rid, "CHRONOS_TRIGGER": "run_now"})      # not the caller's tokens
         with open(os.path.join(cfg["logs_dir"], "chronos.log"), "a") as logf:
             logf.write("%s CLAIMED %s -> spawning run (api start)\n" % (time.strftime("%F %T"), jid))
             logf.flush()
@@ -669,7 +675,7 @@ def stall_run(cfg, jid, ds, run_id, event_hash="", at=None):
     write_block(cfg, at, jid, ds, run_id if RUN_ID_RE.match(run_id or "") else None, "watchdog")
 
 
-def open_run(cfg, jid, ds, trigger="clock", event_hash="", at=None):
+def open_run(cfg, jid, ds, trigger="clock", event_hash="", at=None, pid=None):
     """The run script's first step: the run id (CHRONOS_RUN_ID when `start` minted one, else new) and, for a clock run, the owner file."""
     at = at or C.now()
     rid = os.environ.get("CHRONOS_RUN_ID") or ""
@@ -680,7 +686,8 @@ def open_run(cfg, jid, ds, trigger="clock", event_hash="", at=None):
         claimed = at
         if prev and prev.get("run_id") == rid and prev.get("claimed_at"):
             claimed = _aware_to_local(prev["claimed_at"])
-        write_owner(cfg, jid, ds, rid, "headless", claimed, manual=trigger == "run_now", trigger=trigger)
+        extra = {"pid": int(pid), "pid_start": C.proc_start(pid)} if pid else None      # the run script's pid + start time: a live owner is never swept
+        write_owner(cfg, jid, ds, rid, "headless", claimed, manual=trigger == "run_now", trigger=trigger, extra=extra)
     return rid
 
 
@@ -844,17 +851,21 @@ def probe(cfg, at=None):
     at = at or C.now()
     launchctl = os.environ.get("CHRONOS_LAUNCHCTL") or "launchctl"
     old = read_block(cfg) or {}
-    try:
-        os.remove(cfg["blocked_file"])
-    except FileNotFoundError:
-        pass
     os.makedirs(cfg["home_dir"], exist_ok=True)
+    for n in os.listdir(cfg["home_dir"]):                       # scratch dirs of probes that were killed before they could clean up
+        if n.startswith(".probe.") and time.time() - os.path.getmtime(os.path.join(cfg["home_dir"], n)) > 600:
+            shutil.rmtree(os.path.join(cfg["home_dir"], n), ignore_errors=True)
+    # The block stays until the probe SAYS ok. A caller that kills us at its own deadline (the bridge's is 15 s) must never leave headless
+    # unblocked on an unanswered probe, so nothing is cleared up front.
     label = "io.github.chronos.probe." + secrets.token_hex(4)
     work = tempfile.mkdtemp(prefix=".probe.", dir=cfg["home_dir"])
     out_f, err_f = os.path.join(work, "out"), os.path.join(work, "err")
     plugins = [str(p) for p in cfg["disable_plugins"] if str(p).strip()]
     settings = json.dumps({"enabledPlugins": dict((p, False) for p in plugins)}, separators=(",", ":")) if plugins else ""
-    cmd = ["/bin/bash", "-c", 'export PATH="$1"; cd "$2" || exit 1; shift 2; CHRONOS_RUN=1 exec "$@"', "chronos-probe", run_path(cfg), cfg["workspace"],
+    # the job limits itself (probe_timeout_s + 5), so a probe whose caller was killed never leaves a one-off launchd job alive
+    script = ('export PATH="$1"; L="$2"; cd "$3" || exit 1; shift 3; CHRONOS_RUN=1 "$@" & c=$!; '
+              '( sleep "$L"; kill -9 $c 2>/dev/null ) & w=$!; wait $c; rc=$?; kill $w 2>/dev/null; exit $rc')
+    cmd = ["/bin/bash", "-c", script, "chronos-probe", run_path(cfg), str(cfg["probe_timeout_s"] + 5), cfg["workspace"],
            cfg["claude_bin"], "-p"] + [str(a) for a in cfg["claude_args"]] + (["--settings", settings] if settings else []) + ["--max-turns", "1", "Reply with the word OK."]
     answered, text = False, ""
     try:
@@ -883,6 +894,10 @@ def probe(cfg, at=None):
             pass
         shutil.rmtree(work, ignore_errors=True)
     if answered:
+        try:
+            os.remove(cfg["blocked_file"])
+        except FileNotFoundError:
+            pass
         return {"ok": True, "text": "Background runs work.", "stalled_in_window": stalled_in_window(cfg, at)}
     write_block(cfg, at, old.get("id"), old.get("ds"), old.get("run_id"), "probe", tcc_suspected=True)
     return {"ok": False, "text": text or "Claude did not answer within %d s. macOS is probably waiting for permission." % cfg["probe_timeout_s"],
@@ -890,7 +905,10 @@ def probe(cfg, at=None):
 
 
 # --------------------------------------------------------------------------- the tick's session-wait notification (S7.4)
-def wait_notices(cfg, at=None):
+TICK_INTERVAL_S = 300
+
+
+def wait_notices(cfg, at=None, prev_beat=""):
     """Lines `id|ds|message` for session jobs that have waited session_wait_notify_min with no live session, once per (id, ds).
     Only under session_runner talos (the hook runner never writes the heartbeat, so a stale one would mean nothing). The marker
     `waitnotified-<id>-<ds>` is created before the line is printed, so a crash can lose a notice but never repeat one."""
@@ -902,6 +920,12 @@ def wait_notices(cfg, at=None):
     beat = C.session_beat_age_s(cfg, at)
     if beat is not None and beat <= 180:
         return out
+    if prev_beat:                         # the first tick after a sleep runs before the bridge's first poll: its stale beat proves nothing
+        try:
+            if (at - datetime.datetime.fromisoformat(prev_beat.strip())).total_seconds() > 2 * TICK_INTERVAL_S:
+                return out
+        except ValueError:
+            pass
     try:
         jobs = C.load_jobs(cfg)
     except Exception:
@@ -968,18 +992,20 @@ def main(argv, cfg=None):
     o.add_argument("--ds", required=True)
     o.add_argument("--trigger-kind", dest="trigger_kind", default="clock")
     o.add_argument("--hash", default="")
+    o.add_argument("--pid", type=int, default=0)
     st = sub.add_parser("stall")
     st.add_argument("--id", required=True)
     st.add_argument("--ds", required=True)
     st.add_argument("--run-id", dest="run_id", default="")
     st.add_argument("--hash", default="")
-    sub.add_parser("wait-notify")
+    wn = sub.add_parser("wait-notify")
+    wn.add_argument("--prev-beat", dest="prev_beat", default="")
     a = ap.parse_args(argv)
     if a.cmd == "record":
         record(cfg, a)
         return 0
     if a.cmd == "open":
-        print(open_run(cfg, a.id, a.ds, a.trigger_kind, a.hash))
+        print(open_run(cfg, a.id, a.ds, a.trigger_kind, a.hash, pid=a.pid or None))
         return 0
     if a.cmd == "stall":
         try:
@@ -989,7 +1015,7 @@ def main(argv, cfg=None):
             return 1
         return 0
     if a.cmd == "wait-notify":
-        for line in wait_notices(cfg):
+        for line in wait_notices(cfg, prev_beat=a.prev_beat):
             print(line)
         return 0
     ap.print_help()
