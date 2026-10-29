@@ -1,0 +1,20 @@
+{
+  "error": {
+    "code": "schedule_invalid",
+    "message": "id: id must be 2-40 characters of a-z, 0-9 and dashes; catchup_min: catch-up window must be a whole number of minutes between 15 and 1440; notify: notify must be one of: failure, always, never",
+    "fields": [
+      {
+        "path": "draft.id",
+        "message": "id must be 2-40 characters of a-z, 0-9 and dashes"
+      },
+      {
+        "path": "draft.catchup_min",
+        "message": "catch-up window must be a whole number of minutes between 15 and 1440"
+      },
+      {
+        "path": "draft.notify",
+        "message": "notify must be one of: failure, always, never"
+      }
+    ]
+  }
+}

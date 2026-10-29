@@ -156,7 +156,7 @@
   }
 
   // ------------------------------------------------------------ dashboard
-  var STATUS_LABEL = { ran: "Ran", failed: "Failed", missed: "Missed", "not-due": "Not due", pending: "Upcoming", running: "Running" };
+  var STATUS_LABEL = { ran: "Ran", failed: "Failed", missed: "Missed", "not-due": "Not due", pending: "Upcoming", running: "Running", held: "On hold", stalled: "Stalled" };
   function dotsFor(job) {
     var wrap = h("div", { class: "strip", role: "img", "aria-label": "Last 14 days: " + job.strip.map(function (s) { return s.date + " " + (STATUS_LABEL[s.status] || s.status); }).join(", ") });
     job.strip.forEach(function (s) { wrap.appendChild(h("span", { class: "dot " + s.status, title: s.date + ": " + (STATUS_LABEL[s.status] || s.status) })); });
@@ -172,6 +172,7 @@
     else if (j.today === "ran") c.push(h("span", { class: "chip ok", text: "Done today" }));
     else if (j.today === "failed") c.push(h("span", { class: "chip bad", text: "Failed today" }));
     else if (j.today === "missed") c.push(h("span", { class: "chip warn", text: "Missed today" }));
+    if (j.held) c.push(h("span", { class: "chip bad", text: "On hold" }));
     if (!j.enabled) c.push(h("span", { class: "chip dim", text: "Disabled" }));
     if (j.paused) c.push(h("span", { class: "chip warn", text: "Paused" }));
     if (j.once) c.push(h("span", { class: "chip", text: "One-shot" }));
@@ -222,6 +223,14 @@
           confirmDlg("Already ran today", "Run it again? Today's finished marker for this job is removed first, so the job does its work a second time.", "Run again", true).then(function (ok2) { if (ok2) go(true).catch(fail); });
         } else fail(e);
       });
+    });
+  }
+
+  // A job whose prompt or settings changed outside Chronos is on hold (approval_required). Approving takes the files as they are now.
+  function approveOnDisk(j) {
+    confirmDlg("Approve " + j.name + " as it is on disk?", "This job's prompt or settings were changed outside Chronos, so it will not run. Read the Prompt and Guardrails tabs first. Approving lets it run exactly as it is now.", "Approve").then(function (ok) {
+      if (!ok) return;
+      api("POST", "/api/jobs/" + j.id + "/approve", { content_hash: j.content_hash }).then(function () { toast("Approved " + j.name, "ok"); route(true); }).catch(fail);
     });
   }
 
@@ -342,6 +351,7 @@
         h("p", { class: "lede" }, j.schedule_text, " ", h("span", { class: "chips", style: "display:inline-flex;margin-left:8px" }, stateChips(j))),
         h("div", { class: "chips trustrow" }, trustChips(j))),
       h("div", { style: "display:flex;gap:8px;flex-wrap:wrap" },
+        j.held ? btn("Approve as it is on disk", "shield-check", "primary", function () { approveOnDisk(j); }) : null,
         btn(j.paused ? "Resume" : "Pause", j.paused ? "player-play" : "player-pause", "", function () { togglePauseDetail(j); }),
         btn(j.running ? "Running" : "Run now", "bolt", "primary", function () { runNow(j); }, j.running ? { disabled: "" } : {})));
     var tabs = [["work", "Prompt", "edit"], ["schedule", "Schedule", "calendar-time"], ["triggers", "Triggers", "broadcast"], ["model", "Model", "cpu"], ["guard", "Guardrails", "lock"], ["history", "History", "history"], ["runs", "Runs", "terminal-2"]];

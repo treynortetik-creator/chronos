@@ -1,0 +1,15 @@
+{
+  "api": 1,
+  "chronos": "0.3.0-rc1",
+  "as_of": "2026-10-05T07:45:00-04:00",
+  "tz": "America/New_York",
+  "session_runner": "hook",
+  "approval_required": false,
+  "paused_all": false,
+  "session_beat_age_s": null,
+  "tick_age_s": null,
+  "jobs_file": "$HOME/.config/chronos/jobs.json",
+  "state_dir": "$HOME/.chronos/state",
+  "registry_synced_folder": false,
+  "schedules": []
+}

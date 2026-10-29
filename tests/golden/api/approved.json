@@ -1,0 +1,7 @@
+{
+  "content_hash": "sha256:b8e0e1a9120e57fd65ff00f91021bbeaa638f5290ae5bd073579462a93720c7f",
+  "prompt": "Summarise yesterday's activity.\n",
+  "guard": null,
+  "approved_at": "2026-10-05T07:45:00-04:00",
+  "via": "api_apply"
+}

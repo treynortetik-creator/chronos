@@ -1,0 +1,12 @@
+{
+  "error": {
+    "code": "both_jobs_remain",
+    "message": "these jobs run in the session with a background backup; make each one session or headless first: legacy-both",
+    "fields": [
+      {
+        "path": "legacy-both",
+        "message": "runner is both"
+      }
+    ]
+  }
+}

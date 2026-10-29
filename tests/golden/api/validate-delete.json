@@ -1,0 +1,18 @@
+{
+  "ok": true,
+  "normalized": {
+    "op": "delete",
+    "id": "scratch-job",
+    "base_etag": "sha256:b2aed79a854ef66bfacfb32f7ded680d706b9103697cb171241ce6b0f1cf2967"
+  },
+  "preview": {
+    "when_text": "Weekdays at 7:30 AM",
+    "next_runs": [
+      "2026-10-06T07:30:00-04:00",
+      "2026-10-07T07:30:00-04:00",
+      "2026-10-08T07:30:00-04:00"
+    ],
+    "tz": "America/New_York"
+  },
+  "expected_etag": null
+}

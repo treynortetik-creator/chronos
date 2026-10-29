@@ -304,9 +304,14 @@ installed, is in [docs/triggers.md](docs/triggers.md).
 | `agent_files_extra` | `[]` | More markdown the editor may list (globs, categories, size ceilings). |
 | `agent_files_exclude` | `[]` | Globs the editor must never list (for example a private notes folder). |
 | `agent_files_lint` | `""` | Command run after saving the workspace `CLAUDE.md`; its output is shown. |
+| `session_runner` | `"hook"` | Who runs `in_session` jobs. `"hook"` keeps the optional SessionStart hook arming timers (0.2 behaviour). `"talos"` hands them to an external runner: the hook arms nothing and prints one line. See [The API](#the-api). |
+| `approval_required` | `false` | `true` holds any job whose content differs from its approved record (or has none). Off keeps 0.2 behaviour exactly. |
+| `session_wait_notify_min` | `30` | A session job still waiting this long with no live session notifies once; `0` = off. (Stored now; the notification itself lands in a later 0.3 release candidate.) |
+| `step_deadline_s` | `60` | The tick kills any one of its Python steps with `kill -9`, from outside the process, after this long. |
+| `trigger_deadline_s` | `150` | Same, for the event (trigger) pass. |
 
 Timezone is the system timezone; there is no setting. Environment variables for testing:
-`CHRONOS_NOW=2026-10-05T09:00` (fake clock), `CHRONOS_DRYRUN=1` (tick prints, claims nothing).
+`CHRONOS_NOW=2026-10-05T09:00` (fake clock; a value with an offset is converted to the scheduler's zone), `CHRONOS_DRYRUN=1` (tick prints, claims nothing).
 
 **Permissions note.** Nobody is at the keyboard during a headless run, so `claude -p` cannot ask for
 approval. For **clock runs** the default `--dangerously-skip-permissions` lets the job do anything your
@@ -390,6 +395,115 @@ and reports jobs the headless runner finished since you last looked. Register it
 
 Inside a headless Chronos run the hook stays silent (`CHRONOS_RUN=1`).
 
+With `session_runner: "talos"` in the config the hook arms nothing and prints one line ("Talos runs session jobs; no timers armed."), because an external runner delivers session jobs and arming them here too would run each twice. With `approval_required` on, a held job is never armed.
+
+## The API
+
+`chronos api <verb>` is the interface other programs use to read and drive Chronos (a desktop app, a bot, a script). JSON on
+stdin, JSON on stdout, exit 0 on success and 1 on error. It is new in 0.3 and **off the critical path**: nothing in the tick,
+the run script or the UI depends on it, and with the defaults Chronos behaves exactly as 0.2.2.
+
+```bash
+chronos api version
+# {"api": 1, "chronos": "0.3.0-rc1", "session_runner": "hook", "approval_required": false}
+chronos api snapshot                          # every job, its health, its next run
+echo '{"scope": {"id": "daily-digest"}, "paused": true}' | chronos api pause
+```
+
+| Verb | In | Out |
+|---|---|---|
+| `version` | none | `api` (the major; the same major is compatible), `chronos`, `session_runner`, `approval_required` |
+| `snapshot` | none | `tz`, `as_of`, `session_runner`, `approval_required`, `paused_all`, `session_beat_age_s`, `tick_age_s`, `schedules[]` |
+| `detail <id>` | none | `schedule`, `prompt` (at most 64 KiB, `prompt_truncated`), `guard`, `next_runs`, `runs` |
+| `validate` | a change (below) | `ok`, `normalized`, `preview` (`when_text`, `next_runs`, `tz`), `expected_etag`. Never writes |
+| `apply` | `{"change": ..., "expected_etag": ...}` | `{"ok": true, "etag": ...}` |
+| `pause` | `{"scope": "all" \| {"id": ...}, "paused": true\|false}` | the new pause state |
+| `disable <id>` | none | `{"ok": true, "etag": ...}` |
+| `config set <key> <value> ...` | or the same keys as JSON on stdin | the keys written, in one atomic write |
+| `due --for session` | none | `due[]` of `{id, ds, fire_at, window_ends}`, and it refreshes the session heartbeat |
+| `session-beat` | none | refreshes the session heartbeat |
+| `approved <id>` | none | the approved record, or `null` |
+| `migrate` | answers on stdin | interactive y/N baseline for a 0.2 install; prompts go to stderr, a JSON summary to stdout |
+
+The run verbs (`claim`, `finish`, `start`, `session-prompt`, `health`, `probe`, `orphans`) arrive in the next 0.3 release candidate.
+
+**Errors** are `{"error": {"code": "...", "message": "...", "fields": [{"path": "...", "message": "..."}]}}` with exit 1. Codes:
+`schedule_invalid` (the `fields` say which input), `schedule_conflict` (stale etag, the id already exists), `not_found`,
+`both_jobs_remain`, `bad_request`, `unknown_verb`.
+
+**Times.** Every instant is RFC 3339 with an offset (`2026-07-15T09:00:00-04:00`), and `tz` is an IANA zone name: `$TZ` if it
+names one, otherwise the zone `/etc/localtime` points at. A local time that does not exist (spring forward) fires at the next
+valid minute; an ambiguous one (fall back) fires at its first occurrence, and only once. The scheduling rules themselves are
+unchanged: the engine still compares local clock times, and the markers are still `ran-<id>-<date>`.
+
+**Changes.** `validate` and `apply` take one of four operations:
+
+```json
+{"op": "create", "draft": {"id": "daily-digest", "name": "Daily Digest", "description": "...",
+  "when": {"type": "weekdays", "time": "07:30"}, "catchup_min": 180, "enabled": true, "runner": "session",
+  "permissions": "full", "allowed_tools": [], "model": null, "notify": "failure", "prompt": "Summarise yesterday.\n"}}
+{"op": "update", "id": "daily-digest", "base_etag": "sha256:...", "set": {"catchup_min": 120}}
+{"op": "delete", "id": "daily-digest", "base_etag": "sha256:..."}
+{"op": "adopt",  "id": "daily-digest", "content_hash": "sha256:..."}
+```
+
+`when.type` is `daily`, `weekdays`, `days`, `monthdays` or `once`. `runner` is `session` (offered to a live session only; the tick
+never spawns it) or `headless` (the tick spawns `claude -p`). The old `in_session: true` with no `headless` key means **both**
+(session first, background backup after the grace period); it is shown, but an edit must choose one. `{"in_session": false,
+"headless": false}` can never run and is refused. Restricted, command and event-only jobs are always headless; command and
+event-only jobs are not editable through the API.
+
+`apply` is the **single writer**. Under one lock (`<jobs_file>.lock`, the same one the web UI and the one-shot disabler take) it
+re-validates, refuses if the change is not exactly the `normalized` form `validate` returned, refuses a stale `base_etag` or an
+`expected_etag` that is not what the write would produce (`schedule_conflict`, nothing written), then writes the prompt
+**byte for byte** (trailing newline or none), `jobs.json` (with a history snapshot) and the approved record together.
+
+**Hashes** (opaque; Chronos computes them): `etag` = sha256 of the job record without `created`/`updated`, the prompt bytes and
+the guard bytes, so it moves on any change; `content_hash` covers only what the job is told to do and how it may act (kind,
+command, restricted, allowed tools, model, `in_session`, `headless`, prompt, guard), so renaming, rescheduling, `notify` and
+`disable_once` leave it alone; `state_rev` moves on runs, pauses, holds and the session going stale.
+
+### Approval and `approval_required`
+
+Every save through the single writer, including each save in the web UI (it is token-gated, at your Mac), writes
+`<state_dir>/approved/<id>.json` (mode 0600): `{content_hash, prompt, guard, approved_at, via}`, with `via` one of `api_apply`,
+`ui`, `adopt`, `migrate`. `snapshot` reports `changed_outside: true` for a job whose files no longer match that record, or that
+has none.
+
+With `approval_required: false` (the default) that is information only: a hand-written job, or a hand-edited `prompt.md`, runs
+as it always did, and an upgrade from 0.2.2 holds nothing. With `true`, a job whose content differs from its record, or has no
+record, is **held**: not due, `claim`, `run` and `prompt` refuse (`HELD`), the tick does not spawn it, the hook does not arm it,
+whether or not anything else is running. Deleting `approved/` holds every job; the fail-closed direction is the only direction.
+The web UI shows a held job with **Approve as it is on disk**.
+
+`chronos api migrate` is the baseline for an existing install: it asks, per job, whether to approve it as it is, offers to turn
+each `both` job into session-only, and switches on `session_runner: "talos"` with `approval_required: true` only if no `both`
+job remains (`--no-switch` to skip that). `config set session_runner talos` is refused with `both_jobs_remain` while any `both`
+job exists, because the session and the backup would race.
+
+### Session jobs
+
+`chronos api due --for session` lists the jobs a live session may take now: `in_session`, enabled, on the clock, not restricted,
+not a command, not paused, not held, and inside their window, **with no grace period** (the session goes first). It evaluates
+today's **and yesterday's** fire, so a 23:50 job with a 180 minute window is offered at 00:05 with yesterday's `ds`, claimed on
+yesterday's key, and today's 23:50 run is untouched. One-shots are session jobs only when `session_runner` is `"talos"`. With
+`session_runner: "talos"` the SessionStart hook arms no timers, so the two never both run a job.
+
+### Deadlines from outside the process
+
+The tick runs every Python step (the due check, the claim, the trigger pass) as a child under a bash watchdog, and
+`kill -9`s it after `step_deadline_s` (`trigger_deadline_s` for the trigger pass), logging `DEADLINE <step>` and exiting 0, so a
+step stuck in the kernel (a privacy prompt nobody can see) costs one tick instead of the scheduler. This is deliberately not
+`signal.alarm`: an in-process handler runs only after the blocked syscall returns. The test blocks a step in the kernel for real
+(`open()` of a FIFO that has no writer).
+
+### Golden outputs
+
+`tests/golden/api/*.json` is the output of every verb, generated by the real CLI against a throwaway `HOME` with a fixed clock
+(`2026-10-05T07:45`, `America/New_York`). `tests/run.sh --golden` rewrites them; `tests/test_api_golden.py` fails if the CLI no
+longer prints exactly what is committed. Programs that drive Chronos should vendor these as their contract fixtures instead of
+writing fixtures by hand.
+
 ## Security model
 
 The UI can start `claude` with permissions skipped, and event triggers feed it text from the outside
@@ -450,7 +564,7 @@ loopback-only bind, the webhook secret and throttle, and that no event run ever 
 tests/run.sh
 ```
 
-144 tests, about a minute. They cover the tick's due logic with a fake clock (grace, catch-up, days,
+261 tests (tests/test_chronos.py: the 0.2.2 suite, unchanged; tests/test_api_*.py: the 0.3 API), about two minutes. They cover the tick's due logic with a fake clock (grace, catch-up, days,
 markers, pause, one-shots, a broken `jobs.json`), concurrent claims, the run script against a fake
 `claude` (success, failure, watchdog, one-shot disabling, the plugin-disable flags), the hook, the UI's auth
 and path rules, and for 0.2.0: every trigger type (baselines, settling, rate limit, missing Gmail/`gh`

@@ -2,6 +2,10 @@
 """
 Chronos SessionStart hook (OPTIONAL).
 
+(0.3.0) With config `session_runner: "talos"` this hook arms nothing and prints one line, "Talos runs session jobs; no
+timers armed.": an external runner delivers session jobs, and arming them here as well would run each twice. With
+`approval_required` on, a held job is never armed.
+
 Chronos works without this. It only matters if you want an interactive Claude Code session to run your
 jobs in-session (full context, sub-agents, the exact minute) instead of leaving them to the headless
 launchd runner. Chronos stays the backstop: both sides use the same atomic claim, so a job never runs
@@ -78,6 +82,8 @@ def arm_block(C, cfg, now):
                 continue
             if not C.clock_on(j):
                 continue            # event-only jobs have no clock time to arm
+            if C.is_held(cfg, j):
+                continue            # approval_required and its content is not what was approved: never arm it
             C.validate_job_record(j)
             if not os.path.isfile(C.prompt_file(cfg, j["id"])):
                 continue
@@ -122,6 +128,10 @@ def main():
     import chronoslib as C
     cfg = C.load_config()
     now = C.now()
+    if cfg.get("session_runner") == "talos":
+        # an external runner (Talos) takes the session jobs; arming timers here too would run each job twice
+        blocks = ["Talos runs session jobs; no timers armed.", notices_block(C, cfg)]
+        emit("\n\n".join(b for b in blocks if b))
     blocks = [b for b in (arm_block(C, cfg, now), notices_block(C, cfg)) if b]
     emit("\n\n".join(blocks))
 
