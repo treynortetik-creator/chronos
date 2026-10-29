@@ -9,6 +9,12 @@
 # Runs the command as a child (its stdout and stderr pass straight through, so $(...) capture works), and a watchdog in the
 # background sends it kill -9 after <seconds>, logging "DEADLINE <label>" to $CH_LOGS/chronos.log. Returns the command's exit
 # status (137 when it was killed). The watchdog is stopped as soon as the command finishes, so none outlives its step.
+# ch_tree <pid>: every descendant of <pid>, deepest first (so a killed parent cannot re-parent a child out of reach). Kill by PID only.
+ch_tree() {
+  local k
+  for k in $(pgrep -P "$1" 2>/dev/null); do ch_tree "$k"; echo "$k"; done
+}
+
 ch_step() {
   local secs="$1" label="$2" c w
   shift 2
@@ -19,7 +25,8 @@ ch_step() {
     local sp=$!
     trap 'kill "$sp" 2>/dev/null; exit 0' TERM
     wait "$sp"
-    if kill -9 "$c" 2>/dev/null; then
+    kids="$(ch_tree "$c" | tr '\n' ' ')"
+    if kill -9 $kids "$c" 2>/dev/null; then
       echo "$(date '+%F %T') DEADLINE $label (no answer in ${secs}s; killed)" >> "${CH_LOGS:-/dev/null}/chronos.log" 2>/dev/null
     fi
   ) >/dev/null 2>&1 &

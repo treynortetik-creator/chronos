@@ -21,6 +21,10 @@ import argparse
 import datetime
 import json
 import os
+import re
+import secrets
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -121,7 +125,11 @@ def all_denied(ps):
 
 def write_log(a, ps, raw_text):
     res = ps["result"]
-    if res is not None:
+    if getattr(a, "launch_stalled", 0):
+        body = "[chronos: launch stalled. No output and no CPU progress, so the run was killed and background runs are paused.]"
+        if ps["last_assistant"]:
+            body = ps["last_assistant"] + "\n" + body
+    elif res is not None:
         body = str(res.get("result") or "")
         if res.get("is_error"):
             body = "[claude reported an error: %s]\n%s" % (res.get("subtype") or "error", body)
@@ -165,6 +173,18 @@ def save_rate(cfg, a, rate):
     os.replace(tmp, cfg["rate_file"])
 
 
+def run_fields(cfg, a, ok):
+    """The v0.3.0 fields of a headless run's row: run id, ds, runner, status, trigger_kind, started_at, claude_path."""
+    status = "launch_stalled" if getattr(a, "launch_stalled", 0) else ("ok" if ok else ("timed_out" if a.timed_out else "failed"))
+    claude = ""
+    if not getattr(a, "command", 0) and getattr(a, "claude_bin", ""):
+        p = shutil.which(a.claude_bin, path=run_path(cfg))
+        claude = os.path.realpath(p) if p else ""
+    return {"run_id": getattr(a, "run_id", "") or None, "ds": getattr(a, "ds", "") or None, "runner": "headless", "status": status,
+            "trigger_kind": getattr(a, "trigger_kind", "") or ("event" if a.kind == "event" else "clock"),
+            "started_at": C.aware_iso(datetime.datetime.fromtimestamp(a.start)), "claude_path": claude or None}
+
+
 def record(cfg, a):
     try:
         raw_text = open(a.raw, encoding="utf-8", errors="replace").read()
@@ -180,7 +200,10 @@ def record(cfg, a):
             ok = False           # every tool call was refused: the run "finished" but did nothing; a failure, not a done job
     else:
         ok = bool(a.marker_path) and os.path.exists(a.marker_path)
+    if getattr(a, "launch_stalled", 0):
+        ok = False
     row["ok"] = bool(ok)
+    row.update(run_fields(cfg, a, ok))
     try:
         write_log(a, ps, raw_text)
     except Exception as e:
@@ -259,6 +282,681 @@ def summarize(cfg, rows, now=None, days=14):
     return {"days": [by_day[d] for d in dates], "jobs": jobs, "order": order, "rate": rate}
 
 
+# =========================================================================== v0.3.0: runs (claim, finish, orphans, start, session-prompt, health, probe)
+# Everything below is the Chronos side of "who is running what": run ids, the claim's sibling owner file, per-run reports, the
+# launch-stall block, and the signals `health` reports. The api verbs in chronos_api.py are thin wrappers over these functions.
+RUN_ID_RE = re.compile(r"^r_[0-9A-HJKMNP-TV-Z]{26}$")
+DS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+FINISH_STATUSES = ("ok", "failed", "timed_out", "session_ended")
+MAX_REPORT_BYTES = 256 * 1024
+PROTECTED_DIRS = ("Desktop", "Documents", "Downloads", "Library/Mobile Documents", "Library/CloudStorage")
+_B32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+
+class RunError(Exception):
+    """A request that is not valid: code is a chronos_write.WriteError code (bad_request, not_found, schedule_invalid, held)."""
+
+    def __init__(self, code, message):
+        Exception.__init__(self, message)
+        self.code, self.message = code, message
+
+
+def new_run_id():
+    """r_<ULID>: 48 bits of milliseconds (the scheduler's clock) then 80 random bits, Crockford base32."""
+    ms = int(C.localize(C.now()).timestamp() * 1000) if os.environ.get("CHRONOS_NOW") else int(time.time() * 1000)
+    n = (ms << 80) | secrets.randbits(80)
+    out = ""
+    for _ in range(26):
+        out = _B32[n & 31] + out
+        n >>= 5
+    return "r_" + out
+
+
+def _read_json(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _write_json(path, obj, mode=0o600):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = "%s.tmp.%d" % (path, os.getpid())
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(obj, fh, ensure_ascii=False)
+        fh.write("\n")
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def _write_text(path, text):
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    tmp = "%s.tmp.%d" % (path, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)          # 0600 whatever the caller's umask (a bridge runs with 022)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+
+
+def _touch(path):
+    os.close(os.open(path, os.O_WRONLY | os.O_CREAT, 0o600))
+
+
+def run_report_path(cfg, jid, ds, run_id):
+    """reports/<id>-<ds>-<run_id>.md. Both ids are validated by their regexes before any path is built; the run id is otherwise only a key."""
+    return os.path.join(cfg["reports_dir"], "%s-%s-%s.md" % (jid, ds, run_id))
+
+
+def _job(cfg, jid):
+    if not C.ID_RE.match(jid or ""):
+        raise RunError("bad_request", "bad job id")
+    try:
+        jobs = C.load_jobs(cfg)
+    except Exception as e:
+        raise RunError("registry_unreadable", "jobs file unreadable: %s" % e)
+    job = next((j for j in jobs if isinstance(j, dict) and j.get("id") == jid), None)
+    if job is None:
+        raise RunError("not_found", "no such job")
+    return job
+
+
+def _aware_to_local(s):
+    t = datetime.datetime.fromisoformat(s)
+    return t.astimezone(C.zone_info()).replace(tzinfo=None) if t.tzinfo is not None else t
+
+
+def read_owner(cfg, jid, ds):
+    return _read_json(C.owner_path(cfg, jid, ds))
+
+
+def owners(cfg, jid=None):
+    """[(id, ds, owner dict)] for every claim owner file in the state dir."""
+    out = []
+    try:
+        names = sorted(os.listdir(cfg["state_dir"]))
+    except OSError:
+        return out
+    for n in names:
+        m = re.match(r"^claim-([a-z0-9-]{2,40})-(\d{4}-\d{2}-\d{2})\.owner\.json$", n)
+        if not m or (jid and m.group(1) != jid):
+            continue
+        o = _read_json(os.path.join(cfg["state_dir"], n))
+        if o is not None:
+            out.append((m.group(1), m.group(2), o))
+    return out
+
+
+def write_owner(cfg, jid, ds, run_id, runner, at, manual=False, fire_at=None, bridge_instance="", trigger=None, extra=None):
+    o = {"run_id": run_id, "id": jid, "ds": ds, "runner": runner, "claimed_at": C.aware_iso(at), "fire_at": fire_at,
+         "manual": bool(manual), "bridge_instance": bridge_instance or ""}
+    if trigger:
+        o["trigger"] = trigger
+    if extra:
+        o.update(extra)
+    _write_json(C.owner_path(cfg, jid, ds), o)
+
+
+def _check_run_id(rid):
+    if not isinstance(rid, str) or not RUN_ID_RE.match(rid):
+        raise RunError("bad_request", "run_id must look like r_ followed by 26 characters of a ULID")
+
+
+def _check_ds(ds):
+    if not isinstance(ds, str) or not DS_RE.match(ds):
+        raise RunError("bad_request", "ds must be YYYY-MM-DD")
+    try:
+        return datetime.date.fromisoformat(ds)
+    except ValueError:
+        raise RunError("bad_request", "ds is not a date")
+
+
+# --------------------------------------------------------------------------- claim
+def claim_run(cfg, jid, req, at=None):
+    """-> {"ok": true, "run_id", "ds"} or {"ok": false, "reason": already_done | running_elsewhere | not_due | window_passed | held | paused |
+    failed_today}. The claim directory is the atomic part (mkdir); the owner file is written in the same call, tmp + rename."""
+    at = at or C.now()
+    if not isinstance(req, dict):
+        raise RunError("bad_request", "claim takes a JSON object")
+    job = _job(cfg, jid)
+    rid = req.get("run_id")
+    _check_run_id(rid)
+    manual, again = req.get("manual") is True, req.get("again") is True
+    runner = req.get("runner") or "session"
+    if runner not in ("session", "headless"):
+        raise RunError("bad_request", "runner must be session or headless")
+    inst = req.get("bridge_instance") or ""
+    if not isinstance(inst, str) or len(inst) > 80 or any(ord(c) < 32 for c in inst):
+        raise RunError("bad_request", "bridge_instance must be a short plain string")
+    fire_at = req.get("fire_at")
+    if fire_at is not None and (not isinstance(fire_at, str) or len(fire_at) > 40):
+        raise RunError("bad_request", "fire_at must be an RFC 3339 instant or null")
+    if runner == "session" and (C.is_restricted(job) or C.is_command(job)):
+        raise RunError("schedule_invalid", "a restricted or command job never runs in a live session")
+    ds = req.get("ds")
+    d = _check_ds(ds) if ds is not None else None
+    if ds is None:
+        ds = C.date_key(job, at)         # Run now: the job's own date rule (a one-shot keeps its `once` date)
+        d = datetime.date.fromisoformat(ds)
+    if C.is_held(cfg, job):
+        return {"ok": False, "reason": "held"}
+    if not manual:
+        if job.get("enabled") is not True or not C.clock_on(job):
+            return {"ok": False, "reason": "not_due"}
+        if job.get("once"):
+            if C.parse_once(job["once"]).date() != d:
+                return {"ok": False, "reason": "not_due"}
+        elif not C.is_due_day(job, d):
+            return {"ok": False, "reason": "not_due"}
+        f = C.fire_dt(job, d)
+        if at < f:
+            return {"ok": False, "reason": "not_due"}
+        if at >= f + datetime.timedelta(minutes=C.window_minutes(job)):
+            return {"ok": False, "reason": "window_passed"}
+        if os.path.exists(cfg["pause_all"]) or C.is_paused(cfg, jid):
+            return {"ok": False, "reason": "paused"}
+    ran = os.path.exists(C.ran_path(cfg, jid, ds))
+    if ran and not (manual and again):
+        return {"ok": False, "reason": "already_done"}
+    if not manual and (os.path.exists(C.failed_path(cfg, jid, ds)) or os.path.exists(C.stalled_path(cfg, jid, ds))):
+        return {"ok": False, "reason": "failed_today"}
+    os.makedirs(cfg["state_dir"], exist_ok=True)
+    cp = C.claim_path(cfg, jid, ds)
+    C.sweep_stale_claim(cfg, cp, at)
+    try:
+        os.mkdir(cp)
+    except FileExistsError:
+        return {"ok": False, "reason": "running_elsewhere"}
+    if manual:                                   # under the claim: Run now clears the day's failure, stall and (with `again`) done marker
+        for pth in (C.failed_path(cfg, jid, ds), C.stalled_path(cfg, jid, ds)) + ((C.ran_path(cfg, jid, ds),) if again else ()):
+            try:
+                os.remove(pth)
+            except FileNotFoundError:
+                pass
+    try:
+        write_owner(cfg, jid, ds, rid, runner, at, manual=manual, fire_at=fire_at, bridge_instance=inst, trigger="run_now" if manual else "clock")
+    except Exception:
+        C.remove_claim(cp)
+        raise
+    return {"ok": True, "run_id": rid, "ds": ds}
+
+
+# --------------------------------------------------------------------------- runs.jsonl rows
+def append_row(cfg, row):
+    os.makedirs(cfg["home_dir"], mode=0o700, exist_ok=True)
+    fd = os.open(cfg["runs_file"], os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def run_rows(cfg, jid=None, run_id=None):
+    out = []
+    for r in read_rows(cfg):
+        if r.get("run_id") and (jid is None or r.get("job") == jid) and (run_id is None or r.get("run_id") == run_id):
+            out.append(r)
+    return out
+
+
+def closed_run(cfg, run_id):
+    """The runs.jsonl row that closed this run id (a terminal status), or None."""
+    for r in run_rows(cfg, run_id=run_id):
+        if r.get("status") in FINISH_STATUSES + ("launch_stalled",):
+            return r
+    return None
+
+
+def schedule_run(cfg, row):
+    """A runs.jsonl row -> the ScheduleRun object the app shows."""
+    jid, ds, rid = row.get("job"), row.get("ds"), row.get("run_id")
+    has_report = os.path.isfile(run_report_path(cfg, jid, ds, rid)) or os.path.isfile(C.report_path(cfg, jid, ds))
+    out = {"run_id": rid, "ds": ds, "started_at": row.get("started_at"), "runner": row.get("runner") or "headless",
+           "trigger": row.get("trigger_kind") or "clock", "status": row.get("status") or ("ok" if row.get("ok") else "failed")}
+    if row.get("duration_s") is not None:
+        out["duration_s"] = int(row["duration_s"])
+    if row.get("runner") == "headless" and isinstance(row.get("cost_usd"), (int, float)):
+        out["cost_usd"] = row["cost_usd"]
+    out["has_report"] = bool(has_report)
+    note = late_note(cfg, jid, ds, rid)
+    if note:
+        out["late_note"] = note[:280]
+    return out
+
+
+def late_note(cfg, jid, ds, rid):
+    try:
+        with open(os.path.join(cfg["reports_dir"], "%s-%s-%s.late.md" % (jid, ds, rid)), encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return None
+
+
+# --------------------------------------------------------------------------- finish
+def finish_run(cfg, jid, req, at=None):
+    """-> {"ok": true} | {"ok": false, "reason": "not_owner" | "late"}. Owner check against the claim's sibling file, keyed on that claim's ds."""
+    at = at or C.now()
+    if not isinstance(req, dict):
+        raise RunError("bad_request", "finish takes a JSON object")
+    _job(cfg, jid)
+    rid, status, report = req.get("run_id"), req.get("status"), req.get("report", "")
+    _check_run_id(rid)
+    if status not in FINISH_STATUSES:
+        raise RunError("bad_request", "status must be one of %s" % ", ".join(FINISH_STATUSES))
+    if not isinstance(report, str) or len(report.encode("utf-8")) > MAX_REPORT_BYTES:
+        raise RunError("bad_request", "report must be text of at most %d bytes" % MAX_REPORT_BYTES)
+    closed = closed_run(cfg, rid)
+    if closed is not None:                                   # an already-closed run: keep what was decided, save the words as a note
+        if closed.get("job") == jid and DS_RE.match(str(closed.get("ds"))) and report:
+            _write_text(os.path.join(cfg["reports_dir"], "%s-%s-%s.late.md" % (jid, closed["ds"], rid)), report)
+        return {"ok": False, "reason": "late"}
+    mine = next(((i, ds, o) for i, ds, o in owners(cfg, jid) if o.get("run_id") == rid and o.get("runner") == "session"), None)   # a headless run is never the bridge's to finish
+    if mine is None:
+        return {"ok": False, "reason": "not_owner"}
+    _, ds, own = mine
+    if report:
+        _write_text(run_report_path(cfg, jid, ds, rid), report)
+        _write_text(C.report_path(cfg, jid, ds), report)     # the old per-day path stays a copy of the latest
+    ok = status == "ok"
+    os.makedirs(cfg["state_dir"], exist_ok=True)
+    _touch(C.ran_path(cfg, jid, ds) if ok else C.failed_path(cfg, jid, ds))
+    started = _aware_to_local(own["claimed_at"]) if own.get("claimed_at") else at
+    start_ts = int(C.localize(started).timestamp())
+    end_ts = int(C.localize(at).timestamp())
+    append_row(cfg, {"job": jid, "kind": "schedule", "start": _iso(start_ts), "end": _iso(end_ts), "start_ts": start_ts,
+                     "duration_s": max(0, end_ts - start_ts), "exit": 0 if ok else 1, "timed_out": status == "timed_out", "model": "(session)",
+                     "model_flag": None, "input_tokens": 0, "output_tokens": 0, "cache_creation_tokens": 0, "cache_read_tokens": 0,
+                     "cost_usd": None, "num_turns": None, "is_error": None, "usage_missing": True, "denials": 0, "trigger": None,
+                     "session_id": None, "log": "", "ok": ok, "run_id": rid, "ds": ds, "runner": own.get("runner") or "session",
+                     "started_at": own.get("claimed_at"), "status": status,
+                     "trigger_kind": own.get("trigger") or "clock"})
+    C.remove_claim(C.claim_path(cfg, jid, ds))
+    if ok:
+        C.disable_once(cfg, jid)                              # a finished one-shot switches itself off
+    return {"ok": True}
+
+
+def orphans(cfg, instance):
+    """Session claims whose owner file names a bridge instance other than `instance` (N11)."""
+    if not isinstance(instance, str) or not instance or len(instance) > 80:
+        raise RunError("bad_request", "orphans needs --bridge-instance <id>")
+    return {"orphans": [{"id": i, "ds": ds, "run_id": o.get("run_id")} for i, ds, o in owners(cfg)
+                        if o.get("runner") == "session" and (o.get("bridge_instance") or "") != instance and os.path.isdir(C.claim_path(cfg, i, ds))]}
+
+
+# --------------------------------------------------------------------------- session-prompt and start
+def session_prompt(cfg, jid):
+    """The text a live session runs for this job: {guard, prompt, content_hash}. Refuses `held` itself, so a caller cannot be talked past it."""
+    job = _job(cfg, jid)
+    if C.is_held(cfg, job):
+        raise RunError("held", "this job is on hold: its instructions differ from what was approved")
+    if C.is_restricted(job) or C.is_command(job):
+        raise RunError("schedule_invalid", "a restricted or command job never runs in a live session")
+    if not os.path.isfile(C.prompt_file(cfg, jid)):
+        raise RunError("schedule_invalid", "this job has no prompt.md")
+    gb = C._read_bytes(C.guard_file(cfg, jid)) if os.path.isfile(C.guard_file(cfg, jid)) else None
+    return {"guard": gb.decode("utf-8", "replace") if gb is not None else None,
+            "prompt": C._read_bytes(C.prompt_file(cfg, jid)).decode("utf-8", "replace"),
+            "content_hash": C.job_content_hash(cfg, job)}
+
+
+def _refuse(code, message):
+    return {"ok": False, "code": code, "message": message}
+
+
+def start_headless(cfg, jid, again=False, at=None):
+    """Run now, in the background: take the claim (manual), write the owner file, spawn bin/chronos-run.sh detached.
+    -> {"ok": true, "run_id", "ds"} | {"ok": false, "code": already_running | headless_blocked | held | schedule_invalid, "message"}."""
+    at = at or C.now()
+    job = _job(cfg, jid)
+    if C.is_held(cfg, job):
+        return _refuse("held", "this job is on hold: its instructions differ from what was approved")
+    if job.get("headless") is False:
+        return _refuse("schedule_invalid", "this job runs in your live session only; it has no background run")
+    if not C.is_command(job) and not os.path.isfile(C.prompt_file(cfg, jid)):
+        return _refuse("schedule_invalid", "this job has no prompt.md, so there is nothing to run")
+    try:
+        C.check_restricted_field(job)
+    except ValueError as e:
+        return _refuse("schedule_invalid", str(e))
+    if os.path.exists(cfg["blocked_file"]) and not C.is_command(job):
+        return _refuse("headless_blocked", "background runs are off until the launch problem is fixed")
+    ds = C.date_key(job, at)
+    if os.path.exists(C.ran_path(cfg, jid, ds)) and not again:
+        return _refuse("schedule_invalid", "this job already ran for %s; start it again with again=true" % ds)
+    os.makedirs(cfg["state_dir"], exist_ok=True)
+    os.makedirs(cfg["logs_dir"], exist_ok=True)
+    cp = C.claim_path(cfg, jid, ds)
+    C.sweep_stale_claim(cfg, cp, at)
+    try:
+        os.mkdir(cp)
+    except FileExistsError:
+        return _refuse("already_running", "this job is already running")
+    for pth in (C.failed_path(cfg, jid, ds), C.stalled_path(cfg, jid, ds)) + ((C.ran_path(cfg, jid, ds),) if again else ()):
+        try:
+            os.remove(pth)
+        except FileNotFoundError:
+            pass
+    rid = new_run_id()
+    try:
+        write_owner(cfg, jid, ds, rid, "headless", at, manual=True, trigger="run_now")
+        env = C.scrubbed_env(cfg, {"CHRONOS_RUN_ID": rid, "CHRONOS_TRIGGER": "run_now"})      # not the caller's tokens
+        with open(os.path.join(cfg["logs_dir"], "chronos.log"), "a") as logf:
+            logf.write("%s CLAIMED %s -> spawning run (api start)\n" % (time.strftime("%F %T"), jid))
+            logf.flush()
+            subprocess.Popen(["/bin/bash", os.path.join(C.ROOT_DIR, "bin", "chronos-run.sh"), jid, ds], stdin=subprocess.DEVNULL, stdout=logf,
+                             stderr=subprocess.STDOUT, start_new_session=True, cwd=C.HOME, env=env)
+    except Exception as e:
+        C.remove_claim(cp)
+        return _refuse("schedule_invalid", "could not start the run: %s" % e)
+    return {"ok": True, "run_id": rid, "ds": ds}
+
+
+# --------------------------------------------------------------------------- the launch-stall block
+def read_block(cfg):
+    return _read_json(cfg["blocked_file"])
+
+
+def write_block(cfg, at, jid=None, ds=None, run_id=None, source="watchdog", tcc_suspected=False):
+    _write_json(cfg["blocked_file"], {"reason": "launch_stalled", "since": C.aware_iso(at), "id": jid, "ds": ds, "run_id": run_id,
+                                      "source": source, "tcc_suspected": bool(tcc_suspected)})
+
+
+def stall_run(cfg, jid, ds, run_id, event_hash="", at=None):
+    """A launch stall: the `stalled-` marker (never `failed-`; not for an event run), headless.blocked, and the claim released."""
+    at = at or C.now()
+    if not C.ID_RE.match(jid or "") or not DS_RE.match(ds or ""):
+        raise RunError("bad_request", "bad id or date")
+    os.makedirs(cfg["state_dir"], exist_ok=True)
+    if event_hash:
+        C.remove_claim(C.event_claim_path(cfg, jid, ds, event_hash))
+    else:
+        open(C.stalled_path(cfg, jid, ds), "a").close()
+        C.remove_claim(C.claim_path(cfg, jid, ds))
+    write_block(cfg, at, jid, ds, run_id if RUN_ID_RE.match(run_id or "") else None, "watchdog")
+
+
+def open_run(cfg, jid, ds, trigger="clock", event_hash="", at=None, pid=None):
+    """The run script's first step: the run id (CHRONOS_RUN_ID when `start` minted one, else new) and, for a clock run, the owner file."""
+    at = at or C.now()
+    rid = os.environ.get("CHRONOS_RUN_ID") or ""
+    if not RUN_ID_RE.match(rid):
+        rid = new_run_id()
+    if not event_hash and C.ID_RE.match(jid or "") and DS_RE.match(ds or ""):
+        prev = read_owner(cfg, jid, ds)
+        claimed = at
+        if prev and prev.get("run_id") == rid and prev.get("claimed_at"):
+            claimed = _aware_to_local(prev["claimed_at"])
+        extra = {"pid": int(pid), "pid_start": C.proc_start(pid)} if pid else None      # the run script's pid + start time: a live owner is never swept
+        write_owner(cfg, jid, ds, rid, "headless", claimed, manual=trigger == "run_now", trigger=trigger, extra=extra)
+    return rid
+
+
+# --------------------------------------------------------------------------- health
+def resolve_claude(cfg):
+    """The real path of the claude binary a run would start (same PATH as bin/chronos-run.sh), or ''."""
+    p = shutil.which(cfg["claude_bin"], path=run_path(cfg))
+    return os.path.realpath(p) if p else ""
+
+
+def run_path(cfg):
+    home = os.path.expanduser("~")
+    base = ":".join(["%s/.local/bin" % home, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"])
+    return ":".join(cfg["path"] + [base])
+
+
+def _protected(path):
+    real = os.path.realpath(path)
+    home = os.path.realpath(os.path.expanduser("~"))
+    return real.startswith("/Volumes/") or any(real == os.path.join(home, d) or real.startswith(os.path.join(home, d) + os.sep) for d in PROTECTED_DIRS)
+
+
+def _last_good_claude_path(cfg):
+    best = None
+    for r in read_rows(cfg):
+        if r.get("runner") == "headless" and r.get("ok") is True and r.get("claude_path"):
+            best = r["claude_path"]
+    return best
+
+
+def tcc_suspected(cfg, block):
+    if not block or block.get("reason") != "launch_stalled":
+        return False
+    if block.get("tcc_suspected") is True:
+        return True
+    if any(_protected(cfg[k]) for k in ("workspace", "jobs_file", "jobs_dir")):
+        return True
+    good, now_path = _last_good_claude_path(cfg), resolve_claude(cfg)
+    return bool(good and now_path and os.path.realpath(good) != now_path)
+
+
+def _beat_age(path, at):
+    try:
+        t = datetime.datetime.fromisoformat(C._read_bytes(path).decode("utf-8").strip())
+        if t.tzinfo is not None:
+            t = _aware_to_local(t.isoformat())
+        return max(0, int((at - t).total_seconds()))
+    except (ValueError, OSError):
+        try:
+            return max(0, int(time.time() - os.path.getmtime(path)))
+        except OSError:
+            return None
+
+
+def health(cfg, at=None):
+    """Raw signals for the adapter's health(); codes only, the adapter owns the wording. Every issue is {code, schedule_id}."""
+    at = at or C.now()
+    try:
+        jobs = [j for j in C.load_jobs(cfg) if isinstance(j, dict) and C.ID_RE.match(str(j.get("id", "")))]
+    except Exception as e:
+        raise RunError("registry_unreadable", "jobs file unreadable (%s): %s" % (cfg["jobs_file"], e))
+    issues = []
+
+    def add(code, sid=None):
+        issues.append({"code": code, "schedule_id": sid})
+
+    block = read_block(cfg)
+    paused_all = os.path.exists(cfg["pause_all"])
+    if paused_all:
+        add("paused_all")
+    days = [at.date() - datetime.timedelta(days=1), at.date()]
+    stalled = []
+    for j in jobs:
+        for d in days:
+            if os.path.exists(C.stalled_path(cfg, j["id"], C.day_str(d))):
+                stalled.append(j["id"])
+                break
+    for sid in stalled:
+        add("launch_stalled", sid)
+    if block and block.get("reason") == "launch_stalled" and (block.get("id") not in stalled):
+        add("launch_stalled", block.get("id") if C.ID_RE.match(str(block.get("id") or "")) else None)
+    if block:
+        add("headless_blocked")
+    tcc = tcc_suspected(cfg, block)
+    if tcc:
+        add("tcc_suspected")
+    limit = cfg["timeout_min"] + 5
+    for jid, ds, own in owners(cfg):
+        if os.path.isdir(C.claim_path(cfg, jid, ds)) and own.get("claimed_at"):
+            try:
+                if (at - _aware_to_local(own["claimed_at"])).total_seconds() > limit * 60:
+                    add("run_hung", jid)
+            except ValueError:
+                pass
+    for j in jobs:
+        if C.job_runner(j) == "both":
+            add("legacy_both_runner", j["id"])
+        try:
+            if C.is_held(cfg, j):
+                add("held_jobs", j["id"])
+            if j.get("enabled") is True and C.clock_on(j):
+                born = str(j.get("created") or "")[:10]
+                for d in ([C.parse_once(j["once"]).date()] if j.get("once") else days):
+                    if born and C.day_str(d) < born:
+                        continue            # a day before the job existed was never missed
+                    if C.day_state(cfg, j, d, at) == "missed" and at - (C.fire_dt(j, d) + datetime.timedelta(minutes=C.window_minutes(j))) <= datetime.timedelta(hours=24):
+                        add("missed_recently", j["id"])
+                        break
+        except Exception:
+            continue
+    synced = any(_synced(cfg[k]) for k in ("jobs_file", "state_dir"))
+    if synced:
+        add("registry_synced_folder")
+    bg = [j for j in jobs if j.get("enabled") is True and j.get("headless") is not False]
+    return {
+        "as_of": C.aware_iso(at), "tz": C.zone_name(), "session_runner": cfg["session_runner"], "paused_all": paused_all,
+        "tick_age_s": _beat_age(cfg["beat_file"], at), "session_beat_age_s": C.session_beat_age_s(cfg, at),
+        "headless": "blocked" if block else ("ok" if bg else "unused"),
+        "blocked": ({"since": block.get("since"), "id": block.get("id"), "ds": block.get("ds"), "run_id": block.get("run_id"),
+                     "source": block.get("source")} if block else None),
+        "tcc_suspected": tcc, "claude_path_changed": bool(_last_good_claude_path(cfg) and resolve_claude(cfg) and os.path.realpath(_last_good_claude_path(cfg)) != resolve_claude(cfg)),
+        "registry_synced_folder": synced, "issues": issues,
+    }
+
+
+def _synced(path):
+    real = os.path.realpath(path)
+    home = os.path.realpath(os.path.expanduser("~"))
+    return any(real.startswith(os.path.join(home, r) + os.sep) for r in ("Library/Mobile Documents", "Library/CloudStorage", "Dropbox"))
+
+
+# --------------------------------------------------------------------------- probe (Retry background runs)
+def stalled_in_window(cfg, at):
+    out = []
+    try:
+        jobs = C.load_jobs(cfg)
+    except Exception:
+        return out
+    for j in jobs:
+        if not isinstance(j, dict) or not C.ID_RE.match(str(j.get("id", ""))) or not C.clock_on(j):
+            continue
+        try:
+            ds_list = [day_str_of_once(j)] if j.get("once") else [C.day_str(at.date() - datetime.timedelta(days=1)), C.day_str(at.date())]
+            for ds in ds_list:
+                if os.path.exists(C.stalled_path(cfg, j["id"], ds)) and at < C.fire_dt(j, datetime.date.fromisoformat(ds)) + datetime.timedelta(minutes=C.window_minutes(j)):
+                    out.append({"id": j["id"], "ds": ds})
+        except Exception:
+            continue
+    return out
+
+
+def day_str_of_once(j):
+    return C.day_str(C.parse_once(j["once"]).date())
+
+
+def probe(cfg, at=None):
+    """Retry background runs. Clears headless.blocked, then runs `claude -p "Reply with the word OK." --max-turns 1` as a one-off launchd job
+    (launchctl submit) in the workspace with CHRONOS_RUN=1: the same binary lookup, flags and plugin settings as a real run, and launchd's
+    own environment, which is the whole point (a shell test proves nothing about launchd). OK keeps the block cleared; silence re-trips it.
+    $CHRONOS_LAUNCHCTL replaces the launchctl binary, but only with CHRONOS_TEST_MODE=1 (the tests use a stand-in)."""
+    at = at or C.now()
+    launchctl = C.test_seam("CHRONOS_LAUNCHCTL") or "launchctl"
+    old = read_block(cfg) or {}
+    os.makedirs(cfg["home_dir"], exist_ok=True)
+    for n in os.listdir(cfg["home_dir"]):                       # scratch dirs of probes that were killed before they could clean up
+        if n.startswith(".probe.") and time.time() - os.path.getmtime(os.path.join(cfg["home_dir"], n)) > 600:
+            shutil.rmtree(os.path.join(cfg["home_dir"], n), ignore_errors=True)
+    # The block stays until the probe SAYS ok. A caller that kills us at its own deadline (the bridge's is 15 s) must never leave headless
+    # unblocked on an unanswered probe, so nothing is cleared up front.
+    label = "io.github.chronos.probe." + secrets.token_hex(4)
+    work = tempfile.mkdtemp(prefix=".probe.", dir=cfg["home_dir"])
+    out_f, err_f = os.path.join(work, "out"), os.path.join(work, "err")
+    plugins = [str(p) for p in cfg["disable_plugins"] if str(p).strip()]
+    settings = json.dumps({"enabledPlugins": dict((p, False) for p in plugins)}, separators=(",", ":")) if plugins else ""
+    # the job limits itself (probe_timeout_s + 5), so a probe whose caller was killed never leaves a one-off launchd job alive
+    script = ('export PATH="$1"; L="$2"; cd "$3" || exit 1; shift 3; CHRONOS_RUN=1 "$@" & c=$!; '
+              '( sleep "$L"; kill -9 $c 2>/dev/null ) & w=$!; wait $c; rc=$?; kill $w 2>/dev/null; exit $rc')
+    cmd = ["/bin/bash", "-c", script, "chronos-probe", run_path(cfg), str(cfg["probe_timeout_s"] + 5), cfg["workspace"],
+           cfg["claude_bin"], "-p"] + [str(a) for a in cfg["claude_args"]] + (["--settings", settings] if settings else []) + ["--max-turns", "1", "Reply with the word OK."]
+    answered, text = False, ""
+    try:
+        r = subprocess.run([launchctl, "submit", "-l", label, "-o", out_f, "-e", err_f, "--"] + cmd, capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            text = "could not submit the test job (%s)" % ((r.stderr or r.stdout).strip()[:120] or "launchctl failed")
+        else:
+            end = time.time() + cfg["probe_timeout_s"]
+            while time.time() < end:
+                try:
+                    with open(out_f, encoding="utf-8", errors="replace") as fh:
+                        got = fh.read()
+                except OSError:
+                    got = ""
+                if got.strip():
+                    answered = re.search(r"\bOK\b", got) is not None
+                    text = got.strip()[:200]
+                    break
+                time.sleep(0.2)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        text = "could not run the test job: %s" % e
+    finally:
+        try:
+            subprocess.run([launchctl, "remove", label], capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        shutil.rmtree(work, ignore_errors=True)
+    if answered:
+        try:
+            os.remove(cfg["blocked_file"])
+        except FileNotFoundError:
+            pass
+        return {"ok": True, "text": "Background runs work.", "stalled_in_window": stalled_in_window(cfg, at)}
+    write_block(cfg, at, old.get("id"), old.get("ds"), old.get("run_id"), "probe", tcc_suspected=True)
+    return {"ok": False, "text": text or "Claude did not answer within %d s. macOS is probably waiting for permission." % cfg["probe_timeout_s"],
+            "stalled_in_window": []}
+
+
+# --------------------------------------------------------------------------- the tick's session-wait notification (S7.4)
+TICK_INTERVAL_S = 300
+
+
+def wait_notices(cfg, at=None, prev_beat=""):
+    """Lines `id|ds|message` for session jobs that have waited session_wait_notify_min with no live session, once per (id, ds).
+    Only under session_runner talos (the hook runner never writes the heartbeat, so a stale one would mean nothing). The marker
+    `waitnotified-<id>-<ds>` is created before the line is printed, so a crash can lose a notice but never repeat one."""
+    at = at or C.now()
+    mins = cfg["session_wait_notify_min"]
+    out = []
+    if not mins or cfg["session_runner"] != "talos" or os.path.exists(cfg["pause_all"]):
+        return out
+    beat = C.session_beat_age_s(cfg, at)
+    if beat is not None and beat <= 180:
+        return out
+    if prev_beat:                         # the first tick after a sleep runs before the bridge's first poll: its stale beat proves nothing
+        try:
+            if (at - datetime.datetime.fromisoformat(prev_beat.strip())).total_seconds() > 2 * TICK_INTERVAL_S:
+                return out
+        except ValueError:
+            pass
+    try:
+        jobs = C.load_jobs(cfg)
+    except Exception:
+        return out
+    for j in jobs:
+        try:
+            if not C.session_eligible(cfg, j) or C.job_notify_mode(j) == "never" or C.is_paused(cfg, j["id"]) or C.is_held(cfg, j):
+                continue
+            days = [C.parse_once(j["once"]).date()] if j.get("once") else [at.date() - datetime.timedelta(days=1), at.date()]
+            for d in days:
+                if C.day_state(cfg, j, d, at) != "waiting":
+                    continue
+                f = C.fire_dt(j, d)
+                if at < f + datetime.timedelta(minutes=mins):
+                    continue
+                ds = C.day_str(d)
+                marker = os.path.join(cfg["state_dir"], "waitnotified-%s-%s" % (j["id"], ds))
+                try:
+                    os.makedirs(cfg["state_dir"], exist_ok=True)
+                    os.close(os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+                except FileExistsError:
+                    continue
+                end = f + datetime.timedelta(minutes=C.window_minutes(j))
+                name = re.sub(r"[|\r\n]+", " ", str(j.get("name") or j["id"]))
+                out.append("%s|%s|%s is waiting for your agent session (due %s; runs if it's back before %s)." % (
+                    j["id"], ds, name, C.fmt_clock(f.hour, f.minute), C.fmt_clock(end.hour, end.minute)))
+        except Exception:
+            continue
+    return out
+
+
 def add_record_arguments(sub):
     r = sub.add_parser("record")
     r.add_argument("--raw", required=True)
@@ -275,6 +973,11 @@ def add_record_arguments(sub):
     r.add_argument("--thash", default="")
     r.add_argument("--marker-path", dest="marker_path", default="")
     r.add_argument("--command", type=int, default=0)         # 1 = a command job (plain output, no usage)
+    r.add_argument("--run-id", dest="run_id", default="")
+    r.add_argument("--ds", default="")
+    r.add_argument("--trigger-kind", dest="trigger_kind", default="")
+    r.add_argument("--claude-bin", dest="claude_bin", default="")
+    r.add_argument("--launch-stalled", dest="launch_stalled", type=int, default=0)
     r.add_argument("--restricted", type=int, default=0)      # 1 = a restricted clock run: judged like an event run (clean exit, no error result)
     return r
 
@@ -284,9 +987,36 @@ def main(argv, cfg=None):
     ap = argparse.ArgumentParser(prog="chronos record")
     sub = ap.add_subparsers(dest="cmd")
     add_record_arguments(sub)
+    o = sub.add_parser("open")
+    o.add_argument("--id", required=True)
+    o.add_argument("--ds", required=True)
+    o.add_argument("--trigger-kind", dest="trigger_kind", default="clock")
+    o.add_argument("--hash", default="")
+    o.add_argument("--pid", type=int, default=0)
+    st = sub.add_parser("stall")
+    st.add_argument("--id", required=True)
+    st.add_argument("--ds", required=True)
+    st.add_argument("--run-id", dest="run_id", default="")
+    st.add_argument("--hash", default="")
+    wn = sub.add_parser("wait-notify")
+    wn.add_argument("--prev-beat", dest="prev_beat", default="")
     a = ap.parse_args(argv)
     if a.cmd == "record":
         record(cfg, a)
+        return 0
+    if a.cmd == "open":
+        print(open_run(cfg, a.id, a.ds, a.trigger_kind, a.hash, pid=a.pid or None))
+        return 0
+    if a.cmd == "stall":
+        try:
+            stall_run(cfg, a.id, a.ds, a.run_id, a.hash)
+        except RunError as e:
+            sys.stderr.write("%s\n" % e.message)
+            return 1
+        return 0
+    if a.cmd == "wait-notify":
+        for line in wait_notices(cfg, prev_beat=a.prev_beat):
+            print(line)
         return 0
     ap.print_help()
     return 2

@@ -579,6 +579,8 @@ def tick(cfg, dry=False):
             jid = str(j["id"])
             if not ID_RE.match(jid) or C.is_paused(cfg, jid) or C.is_command(j) or not os.path.isfile(C.prompt_file(cfg, jid)):
                 continue
+            if j.get("headless") is False:
+                continue            # a session-only job is never started by the tick, not by a clock and not by an event
             with JobLock(cfg, jid) as got:
                 if not got:
                     continue

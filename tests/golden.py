@@ -26,15 +26,15 @@ def generate(out_dir):
     home = os.path.realpath(tempfile.mkdtemp(prefix="chronos-golden-home-"))
     made = []
     env = {k: v for k, v in os.environ.items() if not k.startswith("CHRONOS_") and k not in ("TZ", "HOME")}
-    env.update({"HOME": home, "TZ": ZONE, "PATH": os.environ.get("PATH", "/usr/bin:/bin")})
+    env.update({"HOME": home, "TZ": ZONE, "CHRONOS_TEST_MODE": "1", "PATH": os.environ.get("PATH", "/usr/bin:/bin")})
     cfg_dir = os.path.join(home, ".config", "chronos")
     jobs_file = os.path.join(cfg_dir, "jobs.json")
 
     def norm(text):
         return text.replace(home, "$HOME")
 
-    def run(name, args, payload=None, now=NOW, stdin=None, expect=0, save=True):
-        e = dict(env, CHRONOS_NOW=now)
+    def run(name, args, payload=None, now=NOW, stdin=None, expect=0, save=True, extra=None):
+        e = dict(env, CHRONOS_NOW=now, **(extra or {}))
         data = stdin if stdin is not None else (json.dumps(payload) if payload is not None else "")
         r = subprocess.run([sys.executable, CLI, "api"] + args, env=e, input=data, capture_output=True, text=True, timeout=60)
         if r.returncode != expect:
@@ -115,6 +115,41 @@ def generate(out_dir):
                   "created": "2026-09-01T00:00:00", "updated": "2026-09-01T00:00:00"}, "Do the hand-written thing.\n")
         run("migrate", ["migrate"], stdin="y\ny\n")
         run("error-unknown-verb", ["frobnicate"], expect=1)
+
+        # ---- the run verbs (WP-C2). A fake claude and a fake launchctl stand in for the real ones; run ids come from the caller.
+        cfgp = os.path.join(cfg_dir, "config.json")
+        conf = json.load(open(cfgp)) if os.path.exists(cfgp) else {}
+        conf.update({"claude_bin": os.path.join(ROOT, "tests", "fake-claude.sh"), "probe_timeout_s": 2})
+        json.dump(conf, open(cfgp, "w"), indent=2)
+        os.makedirs(os.path.join(home, "chronos-workspace"), exist_ok=True)
+        probe_env = {"CHRONOS_LAUNCHCTL": os.path.join(ROOT, "tests", "fake-launchctl.sh"), "FAKE_LAUNCHCTL_DIR": os.path.join(home, "launchd")}
+        rid1, rid2 = "r_" + "0" * 25 + "1", "r_" + "0" * 25 + "2"
+        creq = lambda rid: {"run_id": rid, "ds": "2026-10-05", "fire_at": "2026-10-05T07:30:00-04:00", "manual": False, "again": False,
+                            "runner": "session", "bridge_instance": "instance-a"}
+        create("run-session", when={"type": "daily", "time": "07:30"})
+        run("claim-ok", ["claim", "run-session"], creq(rid1))
+        run("claim-running-elsewhere", ["claim", "run-session"], creq(rid2))
+        run("orphans", ["orphans", "--bridge-instance", "instance-b"])
+        run("finish-not-owner", ["finish", "run-session"], {"run_id": rid2, "status": "ok", "report": "Not mine.\n"})
+        run("finish-ok", ["finish", "run-session"], {"run_id": rid1, "status": "ok", "report": "Posted the summary.\n"})
+        run("finish-late", ["finish", "run-session"], {"run_id": rid1, "status": "ok", "report": "Too late.\n"})
+        run("session-prompt", ["session-prompt", "run-session"])
+        hand_job({"id": "hand-session", "name": "Hand Session", "description": "written by hand", "time": "08:00", "days": "daily",
+                  "catchup_min": 180, "enabled": True, "in_session": True, "headless": False, "notify": "failure", "once": None,
+                  "created": "2026-09-01T00:00:00", "updated": "2026-09-01T00:00:00"}, "Do the hand session thing.\n")
+        hand_job({"id": "hand-bg", "name": "Hand Bg", "description": "written by hand", "time": "08:00", "days": "daily",
+                  "catchup_min": 180, "enabled": True, "in_session": False, "notify": "failure", "once": None,
+                  "created": "2026-09-01T00:00:00", "updated": "2026-09-01T00:00:00"}, "Do the hand background thing.\n")
+        run("session-prompt-held", ["session-prompt", "hand-session"], expect=1)
+        run("start-held", ["start", "hand-bg"], {"again": False})
+        run("start-session-only", ["start", "daily-digest"], {"again": False})
+        os.makedirs(os.path.join(home, ".chronos"), exist_ok=True)
+        json.dump({"reason": "launch_stalled", "since": "2026-10-05T07:40:00-04:00", "id": "weekly-cleanup", "ds": "2026-10-05", "run_id": rid2,
+                   "source": "watchdog", "tcc_suspected": False}, open(os.path.join(home, ".chronos", "headless.blocked"), "w"))
+        run("start-headless-blocked", ["start", "weekly-cleanup"], {"again": False})
+        run("health", ["health"])
+        run("probe-stalled", ["probe"], {}, extra=dict(probe_env, FAKE_MODE="hang"))
+        run("probe", ["probe"], {}, extra=probe_env)
     finally:
         shutil.rmtree(home, ignore_errors=True)
     return made

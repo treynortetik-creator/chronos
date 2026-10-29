@@ -405,7 +405,7 @@ the run script or the UI depends on it, and with the defaults Chronos behaves ex
 
 ```bash
 chronos api version
-# {"api": 1, "chronos": "0.3.0-rc1", "session_runner": "hook", "approval_required": false}
+# {"api": 1, "chronos": "0.3.0", "session_runner": "hook", "approval_required": false}
 chronos api snapshot                          # every job, its health, its next run
 echo '{"scope": {"id": "daily-digest"}, "paused": true}' | chronos api pause
 ```
@@ -425,7 +425,24 @@ echo '{"scope": {"id": "daily-digest"}, "paused": true}' | chronos api pause
 | `approved <id>` | none | the approved record, or `null` |
 | `migrate` | answers on stdin | interactive y/N baseline for a 0.2 install; prompts go to stderr, a JSON summary to stdout |
 
-The run verbs (`claim`, `finish`, `start`, `session-prompt`, `health`, `probe`, `orphans`) arrive in the next 0.3 release candidate.
+**Run verbs** (0.3.0). A run id is `r_` plus a 26-character ULID: the caller mints it for a session run, Chronos for a background run.
+
+| Verb | In | Out |
+|---|---|---|
+| `claim <id>` | `{run_id, ds, fire_at, manual, again, runner, bridge_instance}` | `{"ok": true, run_id, ds}` or `{"ok": false, "reason": already_done \| running_elsewhere \| not_due \| window_passed \| held \| paused \| failed_today}`. Writes the claim's sibling `claim-<id>-<ds>.owner.json`. `manual` (Run now) skips the window and clears `failed-`/`stalled-` (and `ran-` with `again`) |
+| `finish <id>` | `{run_id, status: ok\|failed\|timed_out\|session_ended, report}` | `{"ok": true}` or `{"ok": false, "reason": "not_owner" \| "late"}`. Writes `reports/<id>-<ds>-<run_id>.md` and keeps `reports/<id>-<ds>.md` as a copy of the latest |
+| `orphans --bridge-instance <x>` | none | `orphans[]` of `{id, ds, run_id}`: session claims owned by another instance |
+| `start <id>` | `{"again": bool}` | run now in the background: `{"ok": true, run_id, ds}` or `{"ok": false, code: already_running\|headless_blocked\|held\|schedule_invalid, message}` |
+| `session-prompt <id>` | none | `{guard, prompt, content_hash}`; error `held` when the files differ from the approved record |
+| `health` | none | raw signals: `headless` (`ok`/`blocked`/`unused`), `tick_age_s`, `tcc_suspected`, `issues[]` of `{code, schedule_id}` |
+| `probe` | none | Retry background runs: `{ok, text, stalled_in_window[]}`. Runs `claude -p "Reply with the word OK."` as a one-off `launchctl submit` job. **Callers must not wait on it synchronously**: it can take up to `probe_timeout_s` (default 120 s), so start it and poll `health` (`headless`) for the answer. `headless.blocked` stays in place until the probe hears OK, so a caller that gives up early never leaves headless unblocked |
+
+A background run that shows no output and no CPU progress for `launch_timeout_s` (default 180) is killed, the day gets a `stalled-<id>-<ds>` marker
+(never `failed-`), `headless.blocked` is written and `notify` is told. While the block exists the tick spawns no Claude run (command jobs still run), and a
+stalled `(id, ds)` stays stalled until Run now. With `session_runner: "talos"`, a session job that has waited `session_wait_notify_min` with no live
+session notifies once per `(id, ds)`, with `CHRONOS_JOB` exported. Each run keeps `run-<id>-<ds>.json` (status, refreshed every poll). A step of the run script that is killed at `step_deadline_s` is treated the same way as a launch stall (`stalled-`, `headless.blocked`, no automatic retry; rerun it by hand).
+
+**Test-only settings** (`CHRONOS_LAUNCHCTL`, `CHRONOS_TEST_BLOCK_FIFO`, `CHRONOS_TEST_BLOCK_FIFO_TRIGGERS`, `CHRONOS_TEST_BLOCK_FIFO_RUN`) are honoured only when `CHRONOS_TEST_MODE=1` is also set; otherwise they are ignored with a warning on stderr.
 
 **Errors** are `{"error": {"code": "...", "message": "...", "fields": [{"path": "...", "message": "..."}]}}` with exit 1. Codes:
 `schedule_invalid` (the `fields` say which input), `schedule_conflict` (stale etag, the id already exists), `not_found`,
