@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1 - 2026-10-29
+
+Two gaps in the 0.3.0 API, found by the Talos integration.
+- `chronos api detail <id>` now returns `runs`: the job's 20 most recent runs, newest first, each `{run_id, ds, status, runner, trigger, started_at, ended_at, duration_s, has_report}` (plus `late_note` when one exists). A day that has only a `failed-` / `stalled-` / `ran-` marker and no run row appears with `run_id: null`. It was always `[]`.
+- `chronos api health` on an install with no `jobs.json` returns a normal result (`headless: "unused"`, no issues) instead of `registry_unreadable`. A jobs file that exists but cannot be parsed is still an error.
+- Compiled Python: no `.pyc` or `__pycache__` was ever committed to Chronos (checked, and a test now guards it); both stay in `.gitignore`.
+- New goldens `detail-with-runs` and `health-empty`; `chronos --version` and `api version` report `0.3.1`.
+
 ## 0.3.0 - 2026-10-29
 
 The runs half of 0.3. New `chronos api` verbs: `claim`, `finish`, `orphans`, `start`, `session-prompt`, `health`, `probe` (README, "Run verbs").

@@ -1,0 +1,68 @@
+{
+  "schedule": {
+    "id": "run-session",
+    "name": "Run Session",
+    "description": "Example job",
+    "kind": "claude",
+    "when": {
+      "type": "daily",
+      "time": "07:30"
+    },
+    "when_text": "Every day at 7:30 AM",
+    "catchup_min": 180,
+    "enabled": true,
+    "paused": false,
+    "runner": "session",
+    "permissions": "full",
+    "allowed_tools": [],
+    "model": null,
+    "notify": "failure",
+    "triggers_count": 0,
+    "next_run": "2026-10-06T07:30:00-04:00",
+    "today": "ran",
+    "ds": "2026-10-05",
+    "window_ends": null,
+    "last_run": {
+      "run_id": "r_00000000000000000000000001",
+      "ds": "2026-10-05",
+      "started_at": "2026-10-05T07:45:00-04:00",
+      "runner": "session",
+      "trigger": "clock",
+      "status": "ok",
+      "duration_s": 0,
+      "has_report": true,
+      "ended_at": "2026-10-05T07:45:00-04:00",
+      "late_note": "Too late."
+    },
+    "prompt_preview": "Summarise yesterday's activity and post it.\n",
+    "prompt_bytes": 44,
+    "editable": true,
+    "read_only_reason": null,
+    "changed_outside": false,
+    "etag": "sha256:194132a68cfd4fc3bd33f6cc95ca66608bfc1dd6422d640f8c1bf807f0a81206",
+    "content_hash": "sha256:1cb006f0940c7c8df6c59c9abc31614ec33b80b745d773f28efb8ebb457e42a4",
+    "state_rev": "sha256:23261e7583c2268bcf700dee6ab44b8f27b52c6bfde1e7c9b6348a79bdf338c4"
+  },
+  "prompt": "Summarise yesterday's activity and post it.\n",
+  "prompt_truncated": false,
+  "guard": null,
+  "next_runs": [
+    "2026-10-06T07:30:00-04:00",
+    "2026-10-07T07:30:00-04:00",
+    "2026-10-08T07:30:00-04:00"
+  ],
+  "runs": [
+    {
+      "run_id": "r_00000000000000000000000001",
+      "ds": "2026-10-05",
+      "started_at": "2026-10-05T07:45:00-04:00",
+      "runner": "session",
+      "trigger": "clock",
+      "status": "ok",
+      "duration_s": 0,
+      "has_report": true,
+      "ended_at": "2026-10-05T07:45:00-04:00",
+      "late_note": "Too late."
+    }
+  ]
+}

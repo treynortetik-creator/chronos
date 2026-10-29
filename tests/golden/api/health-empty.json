@@ -1,0 +1,14 @@
+{
+  "as_of": "2026-10-05T07:45:00-04:00",
+  "tz": "America/New_York",
+  "session_runner": "hook",
+  "paused_all": false,
+  "tick_age_s": null,
+  "session_beat_age_s": null,
+  "headless": "unused",
+  "blocked": null,
+  "tcc_suspected": false,
+  "claude_path_changed": false,
+  "registry_synced_folder": false,
+  "issues": []
+}

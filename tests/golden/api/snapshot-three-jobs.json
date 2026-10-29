@@ -1,6 +1,6 @@
 {
   "api": 1,
-  "chronos": "0.3.0",
+  "chronos": "0.3.1",
   "as_of": "2026-10-05T07:45:00-04:00",
   "tz": "America/New_York",
   "session_runner": "hook",

@@ -405,7 +405,7 @@ the run script or the UI depends on it, and with the defaults Chronos behaves ex
 
 ```bash
 chronos api version
-# {"api": 1, "chronos": "0.3.0", "session_runner": "hook", "approval_required": false}
+# {"api": 1, "chronos": "0.3.1", "session_runner": "hook", "approval_required": false}
 chronos api snapshot                          # every job, its health, its next run
 echo '{"scope": {"id": "daily-digest"}, "paused": true}' | chronos api pause
 ```
@@ -414,7 +414,7 @@ echo '{"scope": {"id": "daily-digest"}, "paused": true}' | chronos api pause
 |---|---|---|
 | `version` | none | `api` (the major; the same major is compatible), `chronos`, `session_runner`, `approval_required` |
 | `snapshot` | none | `tz`, `as_of`, `session_runner`, `approval_required`, `paused_all`, `session_beat_age_s`, `tick_age_s`, `schedules[]` |
-| `detail <id>` | none | `schedule`, `prompt` (at most 64 KiB, `prompt_truncated`), `guard`, `next_runs`, `runs` |
+| `detail <id>` | none | `schedule`, `prompt` (at most 64 KiB, `prompt_truncated`), `guard`, `next_runs`, `runs` (the 20 most recent, newest first: `run_id`, `ds`, `status`, `runner`, `started_at`, `ended_at`, `duration_s`, `has_report`; a day with only a failed/stalled marker has `run_id: null`) |
 | `validate` | a change (below) | `ok`, `normalized`, `preview` (`when_text`, `next_runs`, `tz`), `expected_etag`. Never writes |
 | `apply` | `{"change": ..., "expected_etag": ...}` | `{"ok": true, "etag": ...}` |
 | `pause` | `{"scope": "all" \| {"id": ...}, "paused": true\|false}` | the new pause state |
@@ -434,7 +434,7 @@ echo '{"scope": {"id": "daily-digest"}, "paused": true}' | chronos api pause
 | `orphans --bridge-instance <x>` | none | `orphans[]` of `{id, ds, run_id}`: session claims owned by another instance |
 | `start <id>` | `{"again": bool}` | run now in the background: `{"ok": true, run_id, ds}` or `{"ok": false, code: already_running\|headless_blocked\|held\|schedule_invalid, message}` |
 | `session-prompt <id>` | none | `{guard, prompt, content_hash}`; error `held` when the files differ from the approved record |
-| `health` | none | raw signals: `headless` (`ok`/`blocked`/`unused`), `tick_age_s`, `tcc_suspected`, `issues[]` of `{code, schedule_id}` |
+| `health` | none | raw signals (an install with no `jobs.json` yet is healthy: `headless: unused`, no issues): `headless` (`ok`/`blocked`/`unused`), `tick_age_s`, `tcc_suspected`, `issues[]` of `{code, schedule_id}` |
 | `probe` | none | Retry background runs: `{ok, text, stalled_in_window[]}`. Runs `claude -p "Reply with the word OK."` as a one-off `launchctl submit` job. **Callers must not wait on it synchronously**: it can take up to `probe_timeout_s` (default 120 s), so start it and poll `health` (`headless`) for the answer. `headless.blocked` stays in place until the probe hears OK, so a caller that gives up early never leaves headless unblocked |
 
 A background run that shows no output and no CPU progress for `launch_timeout_s` (default 180) is killed, the day gets a `stalled-<id>-<ds>` marker

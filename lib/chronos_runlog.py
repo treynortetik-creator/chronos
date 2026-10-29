@@ -517,6 +517,11 @@ def schedule_run(cfg, row):
     if row.get("runner") == "headless" and isinstance(row.get("cost_usd"), (int, float)):
         out["cost_usd"] = row["cost_usd"]
     out["has_report"] = bool(has_report)
+    try:
+        if row.get("start_ts") is not None and row.get("duration_s") is not None:
+            out["ended_at"] = C.aware_iso(datetime.datetime.fromtimestamp(float(row["start_ts"]) + float(row["duration_s"])))
+    except (ValueError, TypeError, OverflowError, OSError):
+        pass
     note = late_note(cfg, jid, ds, rid)
     if note:
         out["late_note"] = note[:280]
@@ -747,6 +752,8 @@ def health(cfg, at=None):
     at = at or C.now()
     try:
         jobs = [j for j in C.load_jobs(cfg) if isinstance(j, dict) and C.ID_RE.match(str(j.get("id", "")))]
+    except FileNotFoundError:
+        jobs = []            # a new install has no jobs.json yet: healthy and empty, not an error
     except Exception as e:
         raise RunError("registry_unreadable", "jobs file unreadable (%s): %s" % (cfg["jobs_file"], e))
     issues = []
