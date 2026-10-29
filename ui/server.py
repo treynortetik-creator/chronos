@@ -196,12 +196,12 @@ def day_status(job, d, today_dt):
         return "not-due"
     if d > today:
         return "not-due"
-    f = C.fire_dt(job, d)
-    if d == today and today_dt < f + datetime.timedelta(minutes=GRACE_MIN):
-        return "pending"
-    if d == today and job.get("enabled") is False:
-        return "not-due"
-    return "missed"
+    if os.path.exists(C.stalled_path(CFG, jid, ds)):
+        return "stalled"
+    # the rest is the shared state machine (chronoslib.day_state, S7.5): `waiting` (inside the catch-up window, not run yet) shows
+    # as the dashed "upcoming" dot, and `missed` appears only at or after fire + catchup_min, never right after the grace period
+    st = C.day_state(CFG, job, d, today_dt)
+    return {"waiting": "pending", "not_due": "not-due"}.get(st, st)
 
 
 def parse_created(job):

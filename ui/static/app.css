@@ -147,6 +147,8 @@ h3 { font-size: 15px; letter-spacing: .1em; text-transform: uppercase; color: va
 .dot.missed { border: 2px solid var(--rose); background: transparent; }
 .dot.not-due { width: 5px; height: 5px; margin: 4px; background: #4b4636; }
 .dot.pending { border: 2px dashed var(--gold); background: transparent; }
+.dot.held { border: 2px solid var(--rose); background: repeating-linear-gradient(45deg, transparent 0 3px, var(--rose) 3px 5px); }
+.dot.stalled { border: 2px dotted var(--rose); background: transparent; }
 .dot.running { background: var(--sky); box-shadow: 0 0 0 0 rgba(140,184,240,.7); animation: pulse 1.6s ease-out infinite; }
 @keyframes pulse { 70% { box-shadow: 0 0 0 9px rgba(140,184,240,0); } 100% { box-shadow: 0 0 0 0 rgba(140,184,240,0); } }
 .card-foot { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; padding-top: 4px; border-top: 1px solid var(--line); }
