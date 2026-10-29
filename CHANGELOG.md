@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0-rc2 - unreleased
+
+The runs half of 0.3. New `chronos api` verbs: `claim`, `finish`, `orphans`, `start`, `session-prompt`, `health`, `probe` (README, "Run verbs").
+Run ids (`r_<ULID>`) in `runs.jsonl` with `ds`, `run_id`, `status` and `claude_path`; one report per run plus the per-day copy; the claim's sibling owner
+file (written tmp + rename, removed before every `rmdir`, swept with a stale claim). **Launch watchdog**: a headless run with no output and no CPU progress
+for `launch_timeout_s` is killed and becomes `stalled-` (terminal for the tick) with `headless.blocked`; `probe` is "Retry" (a one-off `launchctl submit`
+job; `CHRONOS_LAUNCHCTL` swaps the binary for tests). Every Python step of `chronos-run.sh` now runs under the external `kill -9` deadline. The tick sends the
+session-wait notification (talos only) and skips Claude runs while headless is blocked. New config: `launch_timeout_s`, `probe_timeout_s`.
+
 ## 0.3.0-rc1 - unreleased
 
 The core of 0.3: a JSON API for programs that drive Chronos, one writer for every change, an approved record that can hold

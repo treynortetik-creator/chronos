@@ -180,8 +180,8 @@ def run_fields(cfg, a, ok):
     if not getattr(a, "command", 0) and getattr(a, "claude_bin", ""):
         p = shutil.which(a.claude_bin, path=run_path(cfg))
         claude = os.path.realpath(p) if p else ""
-    return {"run_id": a.run_id or None, "ds": a.ds or None, "runner": "headless", "status": status,
-            "trigger_kind": a.trigger_kind or ("event" if a.kind == "event" else "clock"),
+    return {"run_id": getattr(a, "run_id", "") or None, "ds": getattr(a, "ds", "") or None, "runner": "headless", "status": status,
+            "trigger_kind": getattr(a, "trigger_kind", "") or ("event" if a.kind == "event" else "clock"),
             "started_at": C.aware_iso(datetime.datetime.fromtimestamp(a.start)), "claude_path": claude or None}
 
 
@@ -782,7 +782,10 @@ def health(cfg, at=None):
             if C.is_held(cfg, j):
                 add("held_jobs", j["id"])
             if j.get("enabled") is True and C.clock_on(j):
+                born = str(j.get("created") or "")[:10]
                 for d in ([C.parse_once(j["once"]).date()] if j.get("once") else days):
+                    if born and C.day_str(d) < born:
+                        continue            # a day before the job existed was never missed
                     if C.day_state(cfg, j, d, at) == "missed" and at - (C.fire_dt(j, d) + datetime.timedelta(minutes=C.window_minutes(j))) <= datetime.timedelta(hours=24):
                         add("missed_recently", j["id"])
                         break

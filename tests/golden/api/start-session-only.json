@@ -1,0 +1,5 @@
+{
+  "ok": false,
+  "code": "schedule_invalid",
+  "message": "this job runs in your live session only; it has no background run"
+}

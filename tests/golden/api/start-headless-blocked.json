@@ -1,0 +1,5 @@
+{
+  "ok": false,
+  "code": "headless_blocked",
+  "message": "background runs are off until the launch problem is fixed"
+}

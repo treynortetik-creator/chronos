@@ -344,6 +344,10 @@ class Health(Base):
         finally:
             e.cleanup()
 
+    def test_a_job_created_after_yesterdays_window_did_not_miss_it(self):
+        self.e.set_jobs([job("fresh", time="23:50", days="daily", created="2026-10-05T08:00:00", catchup_min=60)])
+        self.assertEqual(self.health(now="2026-10-06T00:30")["issues"], [])
+
     def test_a_blocked_headless_with_the_workspace_under_a_protected_folder_is_tcc_suspected(self):
         home = self.e.tmp
         ws = os.path.join(home, "Desktop", "agent")
