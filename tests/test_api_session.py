@@ -167,5 +167,28 @@ class MidnightSnapshot(unittest.TestCase):
             e.cleanup()
 
 
+class DstBothDirections(unittest.TestCase):
+    def test_spring_forward_gap_job_is_offered_at_the_first_valid_instant_inside_its_window(self):
+        e = Env([job("gap", time="02:30", days="daily", catchup_min=30, in_session=True, headless=False)])
+        try:
+            self.assertEqual(due_session(e, "2026-03-08T01:59")["due"], [])
+            d = due_session(e, "2026-03-08T03:00")["due"]
+            self.assertEqual([(x["fire_at"], x["window_ends"]) for x in d], [("2026-03-08T03:00:00-04:00", "2026-03-08T03:30:00-04:00")])
+            self.assertEqual(due_session(e, "2026-03-08T03:30")["due"], [])
+        finally:
+            e.cleanup()
+
+    def test_fall_back_second_hour_has_the_standard_offset_and_the_job_is_still_offered_once(self):
+        e = Env([job("early", time="01:30", days="daily", catchup_min=120, in_session=True, headless=False)])
+        try:
+            s = snap(e, now="2026-11-01T01:45-05:00")
+            self.assertEqual(s["as_of"], "2026-11-01T01:45:00-05:00")
+            d = due_session(e, "2026-11-01T01:45-05:00")["due"]
+            self.assertEqual([(x["id"], x["fire_at"]) for x in d], [("early", "2026-11-01T01:30:00-04:00")])
+            self.e = e
+        finally:
+            e.cleanup()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, warnings="ignore")

@@ -1832,8 +1832,8 @@ class CommandJobs(unittest.TestCase):
 class Version(unittest.TestCase):
     def test_version_is_reported_everywhere(self):
         r = subprocess.run([sys.executable, CLI, "--version"], capture_output=True, text=True)
-        self.assertEqual(r.stdout.strip(), "chronos 0.2.2")
-        self.assertEqual(C.VERSION, "0.2.2")
+        self.assertEqual(r.stdout.strip(), "chronos 0.3.0-rc1")
+        self.assertEqual(C.VERSION, "0.3.0-rc1")
         self.assertIn("## 0.2.1", open(os.path.join(ROOT, "CHANGELOG.md")).read())
 
 
@@ -1945,7 +1945,7 @@ class Installer(unittest.TestCase):
         home, out = self.install("--no-load", "--quiet")
         lines = [l for l in out.splitlines() if l.strip()]
         self.assertEqual(len(lines), 1, out)
-        self.assertTrue(lines[0].startswith("chronos 0.2.2 installed:"), lines[0])
+        self.assertTrue(lines[0].startswith("chronos 0.3.0-rc1 installed:"), lines[0])
         self.assertIn("scheduler NOT loaded (--no-load)", lines[0])
         self.assertNotIn("empty jobs.json", out)
         self.assertTrue(os.path.isfile(os.path.join(home, ".config", "chronos", "jobs.json")))     # quiet changes the words, not the work

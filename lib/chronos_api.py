@@ -238,8 +238,12 @@ def migrate(cfg, args, stdin, stderr):
     stderr.write("Chronos jobs on this Mac:\n")
     for j in jobs:
         first = [l for l in C._read_bytes(C.prompt_file(cfg, j["id"])).decode("utf-8", "replace").splitlines()[:6]]
-        stderr.write("- %s (%s): runner=%s permissions=%s %s\n    %s\n" % (j["id"], j.get("name") or j["id"], C.job_runner(j), C.job_permissions(j),
-                                                                    C.english(j) if C.clock_on(j) else "events", "\n    ".join(first)))
+        guard = C._read_bytes(C.guard_file(cfg, j["id"])).decode("utf-8", "replace").splitlines()[:6]
+        stderr.write("- %s (%s): runner=%s permissions=%s model=%s tools=%s %s\n    %s\n" % (
+            j["id"], j.get("name") or j["id"], C.job_runner(j), C.job_permissions(j), j.get("model") or "default",
+            ",".join(j.get("allowed_tools") or []) or "default", C.english(j) if C.clock_on(j) else "events", "\n    ".join(first)))
+        if guard:
+            stderr.write("    guard.md:\n    %s\n" % "\n    ".join(guard))
     for j in jobs:
         if not C.changed_outside(cfg, j):
             continue

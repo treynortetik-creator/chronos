@@ -230,7 +230,7 @@
   function approveOnDisk(j) {
     confirmDlg("Approve " + j.name + " as it is on disk?", "This job's prompt or settings were changed outside Chronos, so it will not run. Read the Prompt and Guardrails tabs first. Approving lets it run exactly as it is now.", "Approve").then(function (ok) {
       if (!ok) return;
-      api("POST", "/api/jobs/" + j.id + "/approve", {}).then(function () { toast("Approved " + j.name, "ok"); route(true); }).catch(fail);
+      api("POST", "/api/jobs/" + j.id + "/approve", { content_hash: j.content_hash }).then(function () { toast("Approved " + j.name, "ok"); route(true); }).catch(fail);
     });
   }
 

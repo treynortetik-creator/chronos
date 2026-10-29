@@ -152,12 +152,15 @@ def approve(cfg, job, via):
     return rec
 
 
-def approve_on_disk(cfg, jid, via):
-    """'Approve as it is on disk' (UI, adopt, migrate): approve a job exactly as it now stands."""
+def approve_on_disk(cfg, jid, via, content_hash=None):
+    """'Approve as it is on disk' (UI, adopt, migrate): approve a job as it now stands. With `content_hash` the approval is bound
+    to what the owner looked at: if the files moved since, it is refused (schedule_conflict) instead of approving unseen text."""
     with jobs_lock(cfg):
         job = next((j for j in read_jobs(cfg) if isinstance(j, dict) and j.get("id") == jid), None)
         if job is None:
             raise WriteError("not_found", "no such job")
+        if content_hash is not None and content_hash != C.job_content_hash(cfg, job):
+            raise WriteError("schedule_conflict", "the job changed since you looked at it; review it again", [{"path": "content_hash", "message": "stale"}])
         rec = approve(cfg, job, via)
         return {"content_hash": rec["content_hash"], "etag": C.job_etag(cfg, job)}
 
@@ -424,6 +427,10 @@ def plan_change(cfg, change, jobs, ui=False):
             raise invalid("", "delete takes exactly {op, id, base_etag}")
         return dict(change), {"op": op, "id": jid, "old": old, "new": None, "prompt": None, "etag": None}
     # update
+    if C.is_held(cfg, old):
+        raise WriteError("held", "this job is held: its files changed outside Chronos. Review them and send an adopt change "
+                         "(with the content_hash you reviewed) first; an update must not approve what nobody saw",
+                         [{"path": "id", "message": "held"}])
     if set(change) != {"op", "id", "base_etag", "set"} or not isinstance(change.get("set"), dict) or not change["set"]:
         raise invalid("set", "update takes {op, id, base_etag, set} with at least one field in set")
     if C.is_command(old) or not C.clock_on(old):
@@ -445,7 +452,8 @@ def plan_change(cfg, change, jobs, ui=False):
     prompt = n["prompt"].encode("utf-8") if "prompt" in n else None
     pb = prompt if prompt is not None else C._read_bytes(C.prompt_file(cfg, jid))
     return ({"op": "update", "id": jid, "base_etag": base, "set": norm_set},
-            {"op": op, "id": jid, "old": old, "new": new, "prompt": prompt, "etag": C.record_etag(new, pb, C._read_bytes(C.guard_file(cfg, jid)))})
+            {"op": op, "id": jid, "old": old, "new": new, "prompt": prompt, "etag": C.record_etag(new, pb, C._read_bytes(C.guard_file(cfg, jid))),
+             "was_clean": not C.changed_outside(cfg, old)})
 
 
 def preview(cfg, plan):
@@ -506,7 +514,10 @@ def execute(cfg, plan, jobs, via):
             atomic_write(C.prompt_file(cfg, jid), plan["prompt"], 0o644)
         out = [plan["new"] if j.get("id") == jid else j for j in jobs]
         write_jobs(cfg, out)
-        approve(cfg, plan["new"], via)
+        # re-approve only a job that matched its record before this update: otherwise the update would approve outside
+        # edits (a hand-changed prompt, model or tool list) that the caller never submitted
+        if plan.get("was_clean", True):
+            approve(cfg, plan["new"], via)
     elif op == "adopt":
         approve(cfg, plan["new"], via)
     elif op == "delete":

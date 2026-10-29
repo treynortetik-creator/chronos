@@ -35,20 +35,20 @@ import shlex
 import sys
 import time
 
-VERSION = "0.2.2"                    # the release string; the 0.3.0 tag bumps it (the 0.2.2 tests pin it until then)
+VERSION = "0.3.0-rc1"
 API_VERSION = 1                      # `chronos api version` -> {"api": 1, ...}; the same major means compatible
-CHRONOS_API_VERSION = "0.3.0-rc1"    # what `chronos api version` reports as "chronos"
+CHRONOS_API_VERSION = VERSION        # what `chronos api version` reports as "chronos"
 SESSION_RUNNERS = ("hook", "talos")
 
-ID_RE = re.compile(r"^[a-z0-9-]{2,40}$")
-TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
-ONCE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$")
+ID_RE = re.compile(r"^[a-z0-9-]{2,40}\Z")          # \Z, not $: "$" also matches before a trailing newline
+TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)\Z")
+ONCE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}\Z")
 DAY_NAMES = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 DAY_LONG = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 NOTIFY_MODES = ("failure", "always", "never")
 MODEL_RE = re.compile(r"^(opus|sonnet|haiku|claude-[A-Za-z0-9._-]{2,60}(\[1m\])?)$")
 TOOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_\-]{0,80}(\([^,\n]{1,180}\))?$")
-EVENT_HASH_RE = re.compile(r"^[a-f0-9]{10}$")
+EVENT_HASH_RE = re.compile(r"^[a-f0-9]{10}\Z")
 JOB_KINDS = ("claude", "command")
 MAX_COMMAND_LEN = 2000
 
@@ -292,6 +292,24 @@ def tz_name():
 _LOCALTIME_DEFAULT = object()
 
 
+def _fix_invalid_tz():
+    """libc reads an invalid $TZ (like "Not/AZone") as UTC while we would label times with /etc/localtime's zone: every printed
+    instant would be off by the zone's offset. Say so, drop the bad value and let both agree on the system zone."""
+    tz = os.environ.get("TZ", "").lstrip(":")
+    if tz and "/" in tz:
+        try:
+            import zoneinfo
+            zoneinfo.ZoneInfo(tz)
+        except Exception:
+            sys.stderr.write("chronos: TZ=%r is not a time zone; using the system zone instead\n" % tz)
+            del os.environ["TZ"]
+            if hasattr(time, "tzset"):
+                time.tzset()
+
+
+_fix_invalid_tz()
+
+
 def zone_name(env=None, localtime=_LOCALTIME_DEFAULT):
     """The scheduler's IANA zone: $TZ if it names one, otherwise the part of realpath(/etc/localtime) after `zoneinfo/`,
     otherwise UTC. (An abbreviation like EST is not a zone, so tzname() is never used for this.)"""
@@ -326,13 +344,18 @@ def localize(dt):
     """A naive local datetime -> aware, in the scheduler's zone. An ambiguous time (fall back) takes its first occurrence;
     one that does not exist (spring forward) moves to the next valid minute."""
     z = zone_info()
-    t = dt.replace(tzinfo=z, fold=0)
+    t = dt.replace(tzinfo=z)                 # keeps dt.fold: the second pass through a repeated hour stays the second pass
     for _ in range(180):
         back = t.astimezone(datetime.timezone.utc).astimezone(z).replace(tzinfo=None)
         if back == t.replace(tzinfo=None):
             return t
         t = (t.replace(tzinfo=None) + datetime.timedelta(minutes=1)).replace(tzinfo=z, fold=0)
     return t
+
+
+def valid_local(dt):
+    """A naive local time that does not exist (spring forward) -> the first valid minute after it; otherwise unchanged."""
+    return localize(dt).replace(tzinfo=None)
 
 
 def aware_iso(dt):
@@ -448,10 +471,12 @@ def is_due_day(job, d):
 
 
 def fire_dt(job, d):
+    """The naive local fire time for date d. A time that does not exist (spring forward) is the first valid minute after it, so
+    the catch-up window starts when the clock actually reaches it."""
     if job.get("once"):
-        return parse_once(job["once"])
+        return valid_local(parse_once(job["once"]))
     hh, mm = parse_time(job["time"])
-    return datetime.datetime(d.year, d.month, d.day, hh, mm)
+    return valid_local(datetime.datetime(d.year, d.month, d.day, hh, mm))
 
 
 def next_fires(job, after, count=3, horizon_days=800):
@@ -584,6 +609,8 @@ def due_jobs(cfg, at=None):
             validate_job_record(j)
             if not clock_on(j):
                 continue            # event-only job: the trigger pass handles it
+            if j.get("headless") is False:
+                continue            # session-only (S2.1): the live session takes it; the tick NEVER spawns it
             jid = j["id"]
             win = int(j.get("catchup_min", 180))
             if j.get("once"):
@@ -1318,9 +1345,10 @@ def session_beat_age_s(cfg, at=None):
     at = at or now()
     try:
         t = datetime.datetime.fromisoformat(_read_bytes(cfg["session_beat_file"]).decode("utf-8").strip())
-        if t.tzinfo is not None:
-            t = t.astimezone(zone_info()).replace(tzinfo=None)
-        return max(0, int((at - t).total_seconds()))
+        if t.tzinfo is None:
+            t = localize(t)
+        # compare real instants (UTC): across a fall-back change wall-clock subtraction is an hour off
+        return max(0, int((localize(at).astimezone(datetime.timezone.utc) - t.astimezone(datetime.timezone.utc)).total_seconds()))
     except (ValueError, OSError):
         return None
 

@@ -172,12 +172,14 @@ class ApprovedRecordThroughTheUi(unittest.TestCase):
         self.assertTrue(r["held"])
         self.assertTrue(r["changed_outside"])
         st, r = self.ui.req("POST", "/api/jobs/alpha/approve", {})
+        self.assertEqual(st, 400, r)                                                  # the hash of what was reviewed is required
+        st, r = self.ui.req("POST", "/api/jobs/alpha/approve", {"content_hash": sched(self.e, "alpha")["content_hash"]})
         self.assertEqual(st, 200, r)
         rec = json.load(open(approved_path(self.e, "alpha")))
         self.assertEqual(rec["via"], "ui")
         self.assertIn("Also do something new", rec["prompt"])                         # approved exactly as it was on disk
         self.assertEqual(sched(self.e, "alpha")["today"], "waiting")
-        self.assertEqual(self.ui.req("POST", "/api/jobs/no-such/approve", {})[0], 404)
+        self.assertEqual(self.ui.req("POST", "/api/jobs/no-such/approve", {"content_hash": "sha256:" + "0" * 64})[0], 404)
 
     def test_a_ui_settings_save_on_a_held_job_does_not_approve_what_changed_outside(self):
         edit_prompt(self.e, "alpha")

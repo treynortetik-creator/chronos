@@ -564,7 +564,7 @@ loopback-only bind, the webhook secret and throttle, and that no event run ever 
 tests/run.sh
 ```
 
-246 tests (tests/test_chronos.py: the 0.2.2 suite, unchanged; tests/test_api_*.py: the 0.3 API), about two minutes. They cover the tick's due logic with a fake clock (grace, catch-up, days,
+261 tests (tests/test_chronos.py: the 0.2.2 suite, unchanged; tests/test_api_*.py: the 0.3 API), about two minutes. They cover the tick's due logic with a fake clock (grace, catch-up, days,
 markers, pause, one-shots, a broken `jobs.json`), concurrent claims, the run script against a fake
 `claude` (success, failure, watchdog, one-shot disabling, the plugin-disable flags), the hook, the UI's auth
 and path rules, and for 0.2.0: every trigger type (baselines, settling, rate limit, missing Gmail/`gh`

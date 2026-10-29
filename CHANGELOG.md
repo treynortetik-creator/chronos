@@ -53,13 +53,14 @@ honoured on create; the prompt is written byte for byte (the web UI's `write_pro
 a bash watchdog that `kill -9`s it after `step_deadline_s` (60; `trigger_deadline_s` 150 for the trigger pass), logs
 `DEADLINE <step>` and lets the tick exit 0. The test blocks a step in the kernel for real (`open()` of a FIFO with no writer).
 
+**Review fixes** - the tick never spawns a `headless:false` (session-only) job; an API `update` on a held job is refused (`held`) and never re-approves outside edits; spring-forward gap times fire at the first valid instant and the repeated fall-back hour keeps its offset (fold-aware, ages computed in UTC); the web UI never creates `both` jobs under `session_runner: talos`, "Approve as it is on disk" is bound to the reviewed `content_hash`, and a UI prompt save approves only if the settings still match; ids with a trailing newline are rejected; an invalid `$TZ` is dropped with a warning.
+
 **Config** - new keys `session_runner`, `approval_required`, `session_wait_notify_min` (stored; the notification is next),
 `step_deadline_s`, `trigger_deadline_s`.
 
-**Version** - `chronos api version` reports `0.3.0-rc1`. `chronos --version` still says `0.2.2` until the 0.3.0 tag, because the
-0.2.2 tests pin that string and must not change.
+**Version** - `chronos api version` reports `0.3.0-rc1`. `chronos --version` now says `0.3.0-rc1` too (the three version pins in `tests/test_chronos.py` were updated; nothing else in it changed).
 
-**Tests** - 144 -> 246 (102 new: api core 21, writer 27, approval 31, session 14, deadlines 4, golden 5)
+**Tests** - 144 -> 261 (117 new: api core 21, writer 27, approval 31, session 16, deadlines 4, golden 5, review 13)
 
 ## 0.2.2 - 2026-10-07
 

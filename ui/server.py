@@ -354,6 +354,7 @@ def describe_job(job, detail=False):
     runs = runs_for(jid, 12 if not detail else 60)
     out["latest_log"] = next((r for r in runs if r["kind"] == "log"), None)
     out["latest_report"] = next((r for r in runs if r["kind"] == "report"), None)
+    out["content_hash"] = C.job_content_hash(CFG, job)
     out["changed_outside"] = C.changed_outside(CFG, job)
     out["held"] = C.is_held(CFG, job)
     out["approval_required"] = CFG["approval_required"]
@@ -474,8 +475,15 @@ def write_prompt(jid, content, base_sha):
         if cur is not None and cur == content:
             return {"saved": False, "unchanged": True, "sha": sha(content)}
         snap = snapshot_text(jid, cur, "prompt.md") if cur is not None else None
+        # the person saving this text approves THE TEXT. They are not approving settings they were never shown, so a prompt
+        # save approves the job only if everything else still matches the record (a hand-edited model, tool list or guard keeps it held)
+        rec = C.read_approved(CFG, jid)
+        settings_clean = rec is not None and C.record_content_hash(
+            job_rec, (rec.get("prompt") or "").encode("utf-8"), C._read_bytes(C.guard_file(CFG, jid))) == rec["content_hash"] \
+            and (rec.get("guard") is None) == (not os.path.isfile(C.guard_file(CFG, jid)))
         atomic_write(path, content)
-        W.approve(CFG, job_rec, "ui")                  # the person saving this text is approving it
+        if settings_clean:
+            W.approve(CFG, job_rec, "ui")
         return {"saved": True, "sha": sha(content), "snapshot": os.path.basename(snap) if snap else None}
 
 
@@ -526,6 +534,11 @@ def update_schedule(jid, body):
             new["notify"] = body["notify"]
         if new.get("once") and CFG["session_runner"] != "talos":
             new["in_session"] = False                  # one-shots may be session jobs only when an external runner (talos) takes them
+        if "in_session" in body:
+            if new.get("in_session") is True and CFG["session_runner"] == "talos":
+                new["headless"] = False
+            elif new.get("in_session") is False and new.get("headless") is False:
+                new.pop("headless")                    # turning the session off must not leave a job that can never run
         changed = any(new.get(k) != job.get(k) for k in set(new) | set(job) if k != "updated")
         if not changed:
             return {"changed": False, "job": describe_job(job)}
@@ -691,14 +704,17 @@ def set_pause_all(paused):
     return {"paused_all": os.path.exists(PAUSE_ALL)}
 
 
-def approve_on_disk(jid):
-    """'Approve as it is on disk' for a held job: token-gated, goes through the shared writer, record via:'ui'."""
+def approve_on_disk(jid, content_hash):
+    """'Approve as it is on disk' for a held job: token-gated, goes through the shared writer, record via:'ui'. Bound to the
+    content_hash the owner's screen showed: if the files changed since, it is refused (409) rather than approving unseen text."""
     check_id(jid)
     find_job(load_jobs(), jid)
+    if not isinstance(content_hash, str):
+        raise ApiError(400, "send the content_hash of the version you reviewed")
     try:
-        r = W.approve_on_disk(CFG, jid, "ui")
+        r = W.approve_on_disk(CFG, jid, "ui", content_hash)
     except W.WriteError as e:
-        raise ApiError(404 if e.code == "not_found" else 400, e.message)
+        raise ApiError(404 if e.code == "not_found" else 409 if e.code == "schedule_conflict" else 400, e.message)
     return {"approved": True, "content_hash": r["content_hash"], "job": describe_job(find_job(load_jobs(), jid))}
 
 
@@ -754,8 +770,10 @@ def create_job(body):
         if mdl:
             job["model"] = mdl
         job.update({"time": clean["time"], "days": clean["days"], "catchup_min": clean["catchup_min"],
-                    "enabled": True, "in_session": bool(body.get("in_session")) and mode == "recurring",
+                    "enabled": True, "in_session": bool(body.get("in_session")) and (mode == "recurring" or CFG["session_runner"] == "talos"),
                     "notify": notify, "once": clean.get("once"), "created": stamp_now, "updated": stamp_now})
+        if job["in_session"] and CFG["session_runner"] == "talos":
+            job["headless"] = False                    # under talos a session job is session-only: never a `both` job (the tick would double-run it)
         try:
             W.execute(CFG, {"op": "create", "id": jid, "new": job, "prompt": (prompt + "\n").encode("utf-8")}, jobs, "ui")
         except W.WriteError as e:
@@ -1140,7 +1158,7 @@ class Handler(BaseHTTPRequestHandler):
         if action == "model":
             return self._json(200, update_model(jid, body))
         if action == "approve":
-            return self._json(200, approve_on_disk(jid))
+            return self._json(200, approve_on_disk(jid, body.get("content_hash")))
         if action == "run":
             return self._json(202, run_now(jid, bool(body.get("again"))))
         if action == "pause":
