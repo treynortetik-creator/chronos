@@ -60,6 +60,31 @@ def _last_run(cfg, jid, rows=None):
     return out
 
 
+DETAIL_RUNS_MAX = 20
+
+
+def _recent_runs(cfg, jid, rows=None):
+    """Newest first, at most DETAIL_RUNS_MAX: every run row of this job, plus a bare entry for a day that only has a
+    failed-/stalled-/ran- marker (no run row)."""
+    rows = [r for r in (rows if rows is not None else RL.run_rows(cfg, jid)) if r.get("job") == jid]
+    out = [(str(r.get("ds") or ""), float(r.get("start_ts") or 0), RL.schedule_run(cfg, r)) for r in rows]
+    seen = set(x[0] for x in out)
+    try:
+        names = os.listdir(cfg["state_dir"])
+    except OSError:
+        names = []
+    for n in names:
+        for prefix, status in (("ran-", "ok"), ("failed-", "failed"), ("stalled-", "launch_stalled")):
+            if n.startswith(prefix + jid + "-"):
+                ds = n[len(prefix) + len(jid) + 1:]
+                if len(ds) == 10 and ds[4] == "-" and ds[7] == "-" and ds not in seen:
+                    seen.add(ds)
+                    out.append((ds, 0.0, {"run_id": None, "ds": ds, "started_at": None, "runner": None, "trigger": "clock", "status": status,
+                                          "has_report": os.path.isfile(C.report_path(cfg, jid, ds))}))
+    out.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return [x[2] for x in out[:DETAIL_RUNS_MAX]]
+
+
 def _editable(cfg, job, runner, prompt_bytes):
     if C.is_command(job):
         return False, "Command jobs are edited at the Mac"
@@ -175,7 +200,7 @@ def detail(cfg, jid):
     prompt, truncated = _trim_bytes(pb, DETAIL_PROMPT_MAX)
     guard = _trim_bytes(gb, DETAIL_GUARD_MAX)[0] if os.path.isfile(C.guard_file(cfg, jid)) else None
     nf = [C.aware_iso(x) for x in C.next_fires(job, at, 3)] if job.get("enabled") is True else []
-    return {"schedule": s, "prompt": prompt, "prompt_truncated": truncated, "guard": guard, "next_runs": nf, "runs": []}
+    return {"schedule": s, "prompt": prompt, "prompt_truncated": truncated, "guard": guard, "next_runs": nf, "runs": _recent_runs(cfg, jid)}
 
 
 def approved(cfg, jid):

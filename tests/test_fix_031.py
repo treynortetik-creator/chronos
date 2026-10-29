@@ -59,6 +59,7 @@ class DetailRuns(unittest.TestCase):
         self.assertEqual(out["runs"], [])
 
     def test_detail_caps_runs_at_twenty(self):
+        self.e.set_jobs([job("morning", time="07:30", days="daily", in_session=True, headless=False)])
         for i in range(25):
             ds = "2026-09-%02d" % (i + 1)
             rid = "r_" + "0" * 23 + "%03d" % (i + 10)

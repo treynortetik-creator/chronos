@@ -69,6 +69,7 @@ def generate(out_dir):
     try:
         run("version", ["version"])
         run("snapshot-empty", ["snapshot"])
+        run("health-empty", ["health"])                # a new install: no jobs.json yet
         create("daily-digest", golden="create")
         create("weekly-cleanup", when={"type": "days", "days": ["fri"], "time": "17:00"}, runner="headless", permissions="restricted",
                allowed_tools=["Read", "Grep"], model="sonnet", prompt="Tidy the scratch folder.\n")
@@ -133,6 +134,7 @@ def generate(out_dir):
         run("finish-not-owner", ["finish", "run-session"], {"run_id": rid2, "status": "ok", "report": "Not mine.\n"})
         run("finish-ok", ["finish", "run-session"], {"run_id": rid1, "status": "ok", "report": "Posted the summary.\n"})
         run("finish-late", ["finish", "run-session"], {"run_id": rid1, "status": "ok", "report": "Too late.\n"})
+        run("detail-with-runs", ["detail", "run-session"])
         run("session-prompt", ["session-prompt", "run-session"])
         hand_job({"id": "hand-session", "name": "Hand Session", "description": "written by hand", "time": "08:00", "days": "daily",
                   "catchup_min": 180, "enabled": True, "in_session": True, "headless": False, "notify": "failure", "once": None,
