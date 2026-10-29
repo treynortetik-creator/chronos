@@ -306,7 +306,25 @@ def _verb_orphans(cfg, args, stdin):
     return RL.orphans(cfg, inst)
 
 
-RUN_VERBS = {"claim": _verb_claim, "finish": _verb_finish, "orphans": _verb_orphans}
+def _verb_session_prompt(cfg, args, stdin):
+    return RL.session_prompt(cfg, _id_arg(args, stdin))
+
+
+def _verb_start(cfg, args, stdin):
+    req = _read_stdin(stdin)
+    return RL.start_headless(cfg, _id_arg(args, stdin), again=isinstance(req, dict) and req.get("again") is True)
+
+
+def _verb_health(cfg, args, stdin):
+    return RL.health(cfg)
+
+
+def _verb_probe(cfg, args, stdin):
+    return RL.probe(cfg)
+
+
+RUN_VERBS = {"claim": _verb_claim, "finish": _verb_finish, "orphans": _verb_orphans, "session-prompt": _verb_session_prompt,
+             "start": _verb_start, "health": _verb_health, "probe": _verb_probe}
 
 
 # --------------------------------------------------------------------------- dispatch

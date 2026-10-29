@@ -338,7 +338,7 @@ class Health(Base):
         self.assertEqual(self.codes(h), ["legacy_both_runner", "missed_recently", "paused_all"])
         self.assertEqual([i["schedule_id"] for i in h["issues"] if i["code"] == "legacy_both_runner"], ["both"])
         self.assertEqual([i["schedule_id"] for i in h["issues"] if i["code"] == "missed_recently"], ["gone"])      # 05:00 + 180 min = 08:00
-        e = Env([job("h", time="07:30")], approval_required=True)
+        e = Env([job("hh", time="07:30")], approval_required=True)
         try:
             self.assertEqual(self.codes(api(e, ["health"], now=NOW)[0]), ["held_jobs"])
         finally:

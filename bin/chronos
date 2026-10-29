@@ -16,6 +16,7 @@
   chronos today                        today's date as Chronos sees it (honours CHRONOS_NOW)
   chronos claim-event <id> <hash>      atomic claim for one event run: CLAIMED | ALREADY_DONE | RUNNING_ELSEWHERE
   chronos record --raw ... --id ...    usage meter: turn a stream-json run into its log and a runs.jsonl row (used by the run script)
+  chronos runlog open|stall|wait-notify ...   run bookkeeping for the run script and the tick (run id + owner file, launch stall, session-wait notice)
   chronos disable-once <id>            switch a finished one-shot job off
   chronos notice <id> <date> <log> <report> [status]
   chronos api <verb>                   the JSON interface for other programs (version, snapshot, detail, validate, apply, pause,
@@ -90,6 +91,8 @@ def main(argv):
             sys.stderr.write("%s\n" % e)
             return 1
     elif cmd == "prompt" and args:
+        if os.environ.get("CHRONOS_TEST_BLOCK_FIFO_RUN"):   # tests only, like CHRONOS_TEST_BLOCK_FIFO above: the run script's prompt step blocks in the kernel
+            open(os.environ["CHRONOS_TEST_BLOCK_FIFO_RUN"], "rb").read()
         sys.stdout.write(C.build_prompt(cfg, args[0], args[1] if len(args) > 1 else None))
     elif cmd == "jobenv" and args:
         try:
@@ -109,6 +112,8 @@ def main(argv):
         return 0 if res == "CLAIMED" else 1
     elif cmd == "record":
         return RL.main(["record"] + args, cfg)
+    elif cmd == "runlog":
+        return RL.main(args, cfg)
     elif cmd == "field" and len(args) == 2:
         job = next((j for j in C.load_jobs(cfg) if j.get("id") == args[0]), {})
         v = C.job_notify_mode(job) if args[1] == "notify" else job.get(args[1], "")
