@@ -90,6 +90,8 @@ DEFAULTS = {
     "session_wait_notify_min": 30,               # a session job waiting this long with no live session notifies once; 0 = off
     "step_deadline_s": 60,                       # the tick kills any one of its Python steps after this long (kill -9, from outside the process)
     "trigger_deadline_s": 150,                   # same, for the event (trigger) pass
+    "launch_timeout_s": 180,                     # a headless run with no output and no CPU progress this long after launch is a launch stall: killed, `stalled-` marker, headless.blocked
+    "probe_timeout_s": 120,                      # `chronos api probe` waits this long for the one-off launchd job to answer
     # ---- v0.2.0: Control Room
     "claude_home": "~/.claude",                  # where the Control Room reads user-level settings, agents and skills
     "kill_switch_dir": "",                       # hook kill switches (<name>.off); empty = <home_dir>/switches
@@ -136,13 +138,15 @@ def load_config():
     cfg["stale_claim_min"] = int(cfg["stale_claim_min"])
     cfg["session_runner"] = cfg["session_runner"] if cfg["session_runner"] in SESSION_RUNNERS else "hook"
     cfg["approval_required"] = cfg["approval_required"] is True
-    for k in ("session_wait_notify_min", "step_deadline_s", "trigger_deadline_s"):
+    for k in ("session_wait_notify_min", "step_deadline_s", "trigger_deadline_s", "launch_timeout_s", "probe_timeout_s"):
         try:
             cfg[k] = max(0, int(cfg[k]))
         except (TypeError, ValueError):
             cfg[k] = int(DEFAULTS[k])
     cfg["step_deadline_s"] = cfg["step_deadline_s"] or int(DEFAULTS["step_deadline_s"])
     cfg["trigger_deadline_s"] = cfg["trigger_deadline_s"] or int(DEFAULTS["trigger_deadline_s"])
+    cfg["launch_timeout_s"] = cfg["launch_timeout_s"] or int(DEFAULTS["launch_timeout_s"])
+    cfg["probe_timeout_s"] = cfg["probe_timeout_s"] or int(DEFAULTS["probe_timeout_s"])
     cfg["config_path"] = config_path()
     cfg["approved_dir"] = os.path.join(cfg["state_dir"], "approved")
     cfg["session_beat_file"] = os.path.join(cfg["home_dir"], "session.beat")
@@ -159,6 +163,7 @@ def load_config():
     cfg["hook_secrets_dir"] = os.path.join(cfg["home_dir"], "hook-secrets")
     cfg["runs_file"] = os.path.join(cfg["home_dir"], "runs.jsonl")
     cfg["rate_file"] = os.path.join(cfg["home_dir"], "rate-limits.json")
+    cfg["blocked_file"] = os.path.join(cfg["home_dir"], "headless.blocked")
     return cfg
 
 
@@ -184,6 +189,7 @@ def shell_env(cfg):
         "CH_REQUIRE_MARKER=%s" % q("1" if cfg["require_marker"] else ""),
         "CH_STEP_DEADLINE_S=%s" % q(str(cfg["step_deadline_s"])),
         "CH_TRIGGER_DEADLINE_S=%s" % q(str(cfg["trigger_deadline_s"])),
+        "CH_LAUNCH_TIMEOUT_S=%s" % q(str(cfg["launch_timeout_s"])),
         "CH_PATH_EXTRA=%s" % q(":".join(cfg["path"])),
         "CH_CLAUDE_ARGS=(%s)" % " ".join(q(str(a)) for a in cfg["claude_args"]),
     ]
@@ -571,6 +577,49 @@ def failed_path(cfg, jid, ds):
     return os.path.join(cfg["state_dir"], "failed-%s-%s" % (jid, ds))
 
 
+def owner_path(cfg, jid, ds):
+    """The claim's SIBLING owner file (v0.3.0): {run_id, ds, runner, claimed_at, ...}. Removed before every rmdir of the claim."""
+    return claim_path(cfg, jid, ds) + ".owner.json"
+
+
+def remove_claim(cp):
+    """Release a claim directory and its sibling owner file (owner first, so a half-released claim never looks owned)."""
+    try:
+        os.remove(cp + ".owner.json")
+    except OSError:
+        pass
+    try:
+        os.rmdir(cp)
+    except OSError:
+        pass
+
+
+def sweep_stale_claim(cfg, cp, at=None):
+    """Remove a claim (and its owner file) that belongs to a run that died. Age is measured from the owner file's `claimed_at`
+    against the scheduler's clock when there is one, otherwise from the directory's mtime. True when it swept."""
+    at = at or now()
+    if not os.path.isdir(cp):
+        return False
+    age = None
+    try:
+        with open(cp + ".owner.json", encoding="utf-8") as fh:
+            t = datetime.datetime.fromisoformat(json.load(fh)["claimed_at"])
+        if t.tzinfo is not None:
+            t = t.astimezone(zone_info()).replace(tzinfo=None)
+        age = (at - t).total_seconds()
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    if age is None:
+        try:
+            age = time.time() - os.path.getmtime(cp)
+        except OSError:
+            return False
+    if age > cfg["stale_claim_min"] * 60:
+        remove_claim(cp)
+        return not os.path.isdir(cp)
+    return False
+
+
 def report_path(cfg, jid, ds):
     return os.path.join(cfg["reports_dir"], "%s-%s.md" % (jid, ds))
 
@@ -626,6 +675,10 @@ def due_jobs(cfg, at=None):
             ds = date_key(j, at)
             if is_paused(cfg, jid) or os.path.exists(ran_path(cfg, jid, ds)) or os.path.exists(failed_path(cfg, jid, ds)):
                 continue
+            if os.path.exists(stalled_path(cfg, jid, ds)):
+                continue            # N5: a stalled (id, ds) is terminal for the tick, block or no block. Only Run now clears it.
+            if os.path.exists(cfg["blocked_file"]) and not is_command(j):
+                continue            # headless.blocked: no headless Claude runs until Retry clears it; command jobs still run
             if not is_command(j) and not os.path.isfile(prompt_file(cfg, jid)):
                 sys.stderr.write("skip %s: %s missing\n" % (jid, prompt_file(cfg, jid)))
                 continue
@@ -666,11 +719,7 @@ def claim(cfg, jid, unattended=False, at=None):
     ds = date_key(job, at)
     os.makedirs(cfg["state_dir"], exist_ok=True)
     cp = claim_path(cfg, jid, ds)
-    try:
-        if os.path.isdir(cp) and time.time() - os.path.getmtime(cp) > cfg["stale_claim_min"] * 60:
-            os.rmdir(cp)
-    except OSError:
-        pass
+    sweep_stale_claim(cfg, cp, at)
     if os.path.exists(ran_path(cfg, jid, ds)):
         return "ALREADY_DONE"
     try:
@@ -682,10 +731,7 @@ def claim(cfg, jid, unattended=False, at=None):
 
 def release(cfg, jid, ds=None):
     ds = ds or day_str(now().date())
-    try:
-        os.rmdir(claim_path(cfg, jid, ds))
-    except OSError:
-        pass
+    remove_claim(claim_path(cfg, jid, ds))
 
 
 def mark_done(cfg, jid, ds=None):
@@ -722,11 +768,7 @@ def claim_event(cfg, jid, ehash, at=None):
     ds = day_str(at.date())
     os.makedirs(cfg["state_dir"], exist_ok=True)
     cp = event_claim_path(cfg, jid, ds, ehash)
-    try:
-        if os.path.isdir(cp) and time.time() - os.path.getmtime(cp) > cfg["stale_claim_min"] * 60:
-            os.rmdir(cp)
-    except OSError:
-        pass
+    sweep_stale_claim(cfg, cp, at)
     if os.path.exists(event_ran_path(cfg, jid, ds, ehash)):
         return "ALREADY_DONE"
     try:
@@ -1121,11 +1163,7 @@ def start_run(cfg, jid, again=False):
     os.makedirs(cfg["state_dir"], exist_ok=True)
     os.makedirs(cfg["logs_dir"], exist_ok=True)
     cp = claim_path(cfg, jid, ds)
-    try:
-        if os.path.isdir(cp) and time.time() - os.path.getmtime(cp) > cfg["stale_claim_min"] * 60:
-            os.rmdir(cp)
-    except OSError:
-        pass
+    sweep_stale_claim(cfg, cp)
     try:
         os.mkdir(cp)
     except FileExistsError:

@@ -16,6 +16,7 @@ import os
 import sys
 
 import chronoslib as C
+import chronos_runlog as RL
 import chronos_write as W
 
 PREVIEW_CHARS = 400
@@ -36,8 +37,8 @@ def _trim_bytes(b, limit):
     return cut.decode("utf-8", "ignore"), True
 
 
-def _last_run(cfg, jid):
-    """The latest finished day (from its ran-/failed-/stalled- marker). Run ids and timings arrive with the run verbs."""
+def _last_run(cfg, jid, rows=None):
+    """The latest finished day (from its ran-/failed-/stalled- marker), with the run's own fields when runs.jsonl has its row."""
     best = None
     try:
         names = os.listdir(cfg["state_dir"])
@@ -52,7 +53,11 @@ def _last_run(cfg, jid):
     if best is None:
         return None
     ds, status = best
-    return {"ds": ds, "status": status, "has_report": os.path.isfile(C.report_path(cfg, jid, ds))}
+    out = {"ds": ds, "status": status, "has_report": os.path.isfile(C.report_path(cfg, jid, ds))}
+    mine = [r for r in (rows if rows is not None else RL.run_rows(cfg, jid)) if r.get("job") == jid and r.get("ds") == ds]
+    if mine:
+        out = RL.schedule_run(cfg, mine[-1])
+    return out
 
 
 def _editable(cfg, job, runner, prompt_bytes):
@@ -69,7 +74,7 @@ def _editable(cfg, job, runner, prompt_bytes):
     return True, None
 
 
-def describe(cfg, job, at, beat_age):
+def describe(cfg, job, at, beat_age, rows=None):
     jid = job["id"]
     pb, gb = C._read_bytes(C.prompt_file(cfg, jid)), C._read_bytes(C.guard_file(cfg, jid))
     runner = C.job_runner(job)
@@ -93,7 +98,9 @@ def describe(cfg, job, at, beat_age):
     etag, chash = C.record_etag(job, pb, gb), C.record_content_hash(job, pb, gb)
     rec = C.read_approved(cfg, jid)
     beat_bucket = "stale" if beat_age is None or beat_age > 180 else "fresh"
-    state_rev = C.sha256_ref(C.canon([C.day_str(d), state, "", "", paused, held, beat_bucket]))
+    own = RL.read_owner(cfg, jid, C.day_str(d)) if state == "running" else None
+    last = _last_run(cfg, jid, rows)
+    state_rev = C.sha256_ref(C.canon([C.day_str(d), state, (own or {}).get("run_id") or "", (last or {}).get("run_id") or "", paused, held, beat_bucket]))
     prompt_text = pb.decode("utf-8", "replace")
     return {
         "id": jid, "name": job.get("name") or jid, "description": job.get("description") or "",
@@ -104,7 +111,7 @@ def describe(cfg, job, at, beat_age):
         "allowed_tools": list(job.get("allowed_tools") or []), "model": job.get("model") or None,
         "notify": C.job_notify_mode(job), "triggers_count": len(job.get("triggers") or []),
         "next_run": C.aware_iso(nf[0]) if nf else None, "today": state, "ds": C.day_str(d), "window_ends": fire_end,
-        "last_run": _last_run(cfg, jid),
+        "last_run": last,
         "prompt_preview": _strip_controls(prompt_text)[:PREVIEW_CHARS] if not C.is_command(job) else "",
         "prompt_bytes": len(pb), "editable": editable, "read_only_reason": why,
         "changed_outside": rec is None or rec["content_hash"] != chash,
@@ -139,11 +146,12 @@ def snapshot(cfg):
     except Exception as e:
         raise W.WriteError("registry_unreadable", "jobs file unreadable (%s): %s" % (cfg["jobs_file"], e))
     beat = C.session_beat_age_s(cfg, at)
+    rows = RL.run_rows(cfg)
     out = []
     for j in jobs:
         if isinstance(j, dict) and C.ID_RE.match(str(j.get("id", ""))):
             try:
-                out.append(describe(cfg, j, at, beat))
+                out.append(describe(cfg, j, at, beat, rows))
             except Exception as e:  # one broken record must not hide the others
                 out.append({"id": j["id"], "error": str(e)})
     return {
@@ -279,6 +287,28 @@ def _convert_unapproved(cfg, plan, jobs):
     W.write_jobs(cfg, [plan["new"] if j.get("id") == plan["id"] else j for j in jobs])
 
 
+# --------------------------------------------------------------------------- run verbs (v0.3.0, WP-C2)
+def _id_arg(args, stdin):
+    jid = args[0] if args and not args[0].startswith("--") else None
+    return jid
+
+
+def _verb_claim(cfg, args, stdin):
+    return RL.claim_run(cfg, _id_arg(args, stdin), _read_stdin(stdin))
+
+
+def _verb_finish(cfg, args, stdin):
+    return RL.finish_run(cfg, _id_arg(args, stdin), _read_stdin(stdin))
+
+
+def _verb_orphans(cfg, args, stdin):
+    inst = args[args.index("--bridge-instance") + 1] if "--bridge-instance" in args and args.index("--bridge-instance") + 1 < len(args) else None
+    return RL.orphans(cfg, inst)
+
+
+RUN_VERBS = {"claim": _verb_claim, "finish": _verb_finish, "orphans": _verb_orphans}
+
+
 # --------------------------------------------------------------------------- dispatch
 def _read_stdin(stdin):
     raw = stdin.read()
@@ -347,4 +377,9 @@ def dispatch(argv, cfg, stdin, stderr):
         return approved(cfg, jid)
     if verb == "migrate":
         return migrate(cfg, args, stdin, stderr)
+    if verb in RUN_VERBS:
+        try:
+            return RUN_VERBS[verb](cfg, args, stdin)
+        except RL.RunError as e:
+            raise W.WriteError(e.code, e.message)
     raise W.WriteError("unknown_verb", "unknown api verb %r" % verb)
