@@ -196,11 +196,40 @@ class RunScriptDeadlines(unittest.TestCase):
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertLess(took, 2 + 3, "took %.1fs" % took)
             self.assertIn("DEADLINE prompt", open(os.path.join(e.cfg["logs_dir"], "chronos.log")).read())
-            self.assertTrue(os.path.exists(os.path.join(e.cfg["state_dir"], "failed-alpha-" + D)))
+            self.assertTrue(os.path.exists(os.path.join(e.cfg["state_dir"], "stalled-alpha-" + D)), "a killed step is a launch stall (N1)")
+            self.assertFalse(os.path.exists(os.path.join(e.cfg["state_dir"], "failed-alpha-" + D)))
+            self.assertTrue(os.path.exists(e.cfg["blocked_file"]))
             self.assertFalse(os.path.isdir(os.path.join(e.cfg["state_dir"], "claim-alpha-" + D)))
             self.assertEqual([p for p in subprocess.run(["pgrep", "-f", fifo], capture_output=True, text=True).stdout.split() if p != str(os.getpid())], [])
         finally:
             e.cleanup()
+
+
+class TestSeamsNeedTestMode(unittest.TestCase):
+    """N3: the test-only variables are honoured only when CHRONOS_TEST_MODE=1 is also set; otherwise ignored with a warning on stderr."""
+
+    def test_a_fifo_seam_without_test_mode_is_ignored_and_warned_about(self):
+        e = Env([job("alpha", time="08:30")])
+        fifo = os.path.join(e.tmp, "stuck.fifo")
+        os.mkfifo(fifo)
+        try:
+            env = e.env(CHRONOS_TEST_BLOCK_FIFO=fifo, CHRONOS_NOW=NOW)
+            env.pop("CHRONOS_TEST_MODE")
+            r = subprocess.run([sys.executable, CLI, "due"], env=env, capture_output=True, text=True, timeout=10)     # honoured, this would block forever
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("CHRONOS_TEST_BLOCK_FIFO", r.stderr)
+            self.assertIn("ignored", r.stderr)
+        finally:
+            e.cleanup()
+
+    def test_the_launchctl_seam_is_empty_without_test_mode_and_set_with_it(self):
+        code = "import sys; sys.path.insert(0, %r); import chronoslib as C; print(repr(C.test_seam('CHRONOS_LAUNCHCTL')))" % os.path.join(ROOT, "lib")
+        base = {k: v for k, v in os.environ.items() if not k.startswith("CHRONOS_")}
+        off = subprocess.run([sys.executable, "-c", code], env=dict(base, CHRONOS_LAUNCHCTL="/tmp/x"), capture_output=True, text=True)
+        on = subprocess.run([sys.executable, "-c", code], env=dict(base, CHRONOS_LAUNCHCTL="/tmp/x", CHRONOS_TEST_MODE="1"), capture_output=True, text=True)
+        self.assertEqual(off.stdout.strip(), "''")
+        self.assertIn("ignored", off.stderr)
+        self.assertEqual(on.stdout.strip(), "'/tmp/x'")
 
 
 if __name__ == "__main__":

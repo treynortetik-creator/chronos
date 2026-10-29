@@ -26,7 +26,7 @@ def generate(out_dir):
     home = os.path.realpath(tempfile.mkdtemp(prefix="chronos-golden-home-"))
     made = []
     env = {k: v for k, v in os.environ.items() if not k.startswith("CHRONOS_") and k not in ("TZ", "HOME")}
-    env.update({"HOME": home, "TZ": ZONE, "PATH": os.environ.get("PATH", "/usr/bin:/bin")})
+    env.update({"HOME": home, "TZ": ZONE, "CHRONOS_TEST_MODE": "1", "PATH": os.environ.get("PATH", "/usr/bin:/bin")})
     cfg_dir = os.path.join(home, ".config", "chronos")
     jobs_file = os.path.join(cfg_dir, "jobs.json")
 
