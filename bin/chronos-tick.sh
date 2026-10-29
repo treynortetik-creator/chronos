@@ -48,10 +48,24 @@ while IFS='|' read -r id ds; do
   nohup /bin/bash "$DIR/chronos-run.sh" "$id" "$ds" >> "$CH_LOGS/chronos.log" 2>&1 &
 done <<< "$DUE"
 
+# ---- session-wait notifications (v0.3.0, S7.4). A session job that has waited session_wait_notify_min with no live session
+# is announced once per (id, ds) through the `notify` command, with CHRONOS_JOB exported so the command can pick the job's thread.
+if [ -z "$DRY" ]; then
+  WAITS=$(ch_step "$CH_STEP_DEADLINE_S" wait-notify "$PYBIN" "$DIR/chronos" runlog wait-notify 2>>"$CH_LOGS/chronos.log") || WAITS=""
+  while IFS='|' read -r wid wds wmsg; do
+    [ -n "$wid" ] && [ -n "$wmsg" ] || continue
+    echo "$(date '+%F %T') WAITING $wid ($wds): no live session; notifying" >> "$CH_LOGS/chronos.log"
+    CHRONOS_JOB="$wid" CHRONOS_EVENT=session_wait "$DIR/chronos-notify" "$wmsg" >/dev/null 2>&1 || true
+  done <<< "$WAITS"
+fi
+
 # ---- event pass. Runs AFTER the clock jobs are claimed, so a slow Gmail/GitHub poll never delays a scheduled job
 # (the Python side has a 150 s hard stop). Each stdout line is  id|eventhash|eventfile|type.
 if [ -n "$DRY" ]; then
   ch_step "$CH_TRIGGER_DEADLINE_S" triggers "$PYBIN" "$DIR/chronos" triggers --dry 2>>"$CH_LOGS/chronos.log" || true
+elif [ -e "$CH_HOME/headless.blocked" ]; then
+  # headless.blocked: no headless Claude runs (an event run is one) until Retry clears it. Command jobs are clock jobs and already ran above.
+  echo "$(date '+%F %T') TRIGGERS skipped: headless runs are blocked (see headless.blocked)" >> "$CH_LOGS/chronos.log"
 else
   HITS=$(ch_step "$CH_TRIGGER_DEADLINE_S" triggers "$PYBIN" "$DIR/chronos" triggers 2>>"$CH_LOGS/chronos.log") || HITS=""
   while IFS='|' read -r tid thash tfile ttype; do

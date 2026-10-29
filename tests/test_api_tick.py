@@ -11,6 +11,7 @@ import warnings
 warnings.simplefilter("ignore", ResourceWarning)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from api_helpers import *  # noqa: E402,F401,F403
+from test_chronos import RUN  # noqa: E402
 
 D = "2026-10-05"
 NOW = D + "T09:30"
@@ -139,7 +140,7 @@ class SessionWaitNotify(unittest.TestCase):
         self.e.cleanup()
 
     def tick(self, t, **kw):
-        r = self.e.run(["/bin/bash", TICK], CHRONOS_NOW=D + "T" + t, **kw)
+        r = self.e.run(["/bin/bash", TICK], CHRONOS_NOW=D + "T" + t, TZ=NY, **kw)
         time.sleep(0.8)
         return r
 
