@@ -11,8 +11,12 @@ Verbs: version, snapshot, detail <id>, validate, apply, pause, disable <id>, con
 session-beat, approved <id>, migrate, and the run verbs (claim, finish, start, session-prompt, health, probe, orphans).
 `report <id> [--date <date_key>] [--run <run_id>]` reads one stored run report and writes nothing.
 """
+import codecs
+import datetime
 import json
 import os
+import re
+import stat
 import sys
 
 import chronoslib as C
@@ -135,7 +139,7 @@ def describe(cfg, job, at, beat_age, rows=None):
         "runner": runner or "headless", "permissions": C.job_permissions(job),
         "allowed_tools": list(job.get("allowed_tools") or []), "model": job.get("model") or None,
         "notify": C.job_notify_mode(job), "triggers_count": len(job.get("triggers") or []),
-        "next_run": C.aware_iso(nf[0]) if nf else None, "today": state, "ds": C.day_str(d), "date_key": C.date_key(job, at), "window_ends": fire_end,
+        "next_run": C.aware_iso(nf[0]) if nf else None, "today": state, "ds": C.day_str(d), "date_key": C.date_key(job, at) if job.get("once") else C.day_str(d), "window_ends": fire_end,
         "last_run": last,
         "prompt_preview": _strip_controls(prompt_text)[:PREVIEW_CHARS] if not C.is_command(job) else "",
         "prompt_bytes": len(pb), "editable": editable, "read_only_reason": why,
@@ -204,42 +208,91 @@ def detail(cfg, jid):
 
 
 REPORT_MAX = 256 * 1024
+_DATE_KEY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
+_RUN_ID = re.compile(r"r_[0-9A-HJKMNP-TV-Z]{26}\Z")
 
 
-def _report_args(args):
-    """-> (job id, date_key or None, run id or None); anything else is bad_request."""
-    jid, ds, rid, i = None, None, None, 0
-    while i < len(args):
-        a = args[i]
-        if a in ("--date", "--run"):
-            if i + 1 >= len(args) or args[i + 1].startswith("--"):
-                raise W.WriteError("bad_request", "%s needs a value" % a)
-            if a == "--date":
-                ds = args[i + 1]
+def _valid_date(v):
+    if not isinstance(v, str) or not _DATE_KEY.match(v):
+        return False
+    try:
+        datetime.date(int(v[:4]), int(v[5:7]), int(v[8:10]))
+    except ValueError:
+        return False
+    return True
+
+
+def _valid_run_id(v):
+    return isinstance(v, str) and _RUN_ID.match(v) is not None
+
+
+def _report_args(args, stdin):
+    """-> (job id, date_key or None, run id or None); anything else is bad_request. With no arguments the same fields come as
+    JSON on stdin ({"id": ..., "date": ..., "run": ...}), like `detail`."""
+    usage = "usage: chronos api report <job id> [--date <date_key>] [--run <run_id>]"
+    jid, ds, rid = None, None, None
+    if not args:
+        req = _read_stdin(stdin)
+        if not isinstance(req, dict) or not set(req) <= {"id", "date", "run"}:
+            raise W.WriteError("bad_request", usage)
+        jid, ds, rid = req.get("id"), req.get("date"), req.get("run")
+    else:
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a in ("--date", "--run"):
+                if i + 1 >= len(args) or args[i + 1].startswith("--"):
+                    raise W.WriteError("bad_request", "%s needs a value" % a)
+                if (a == "--date" and ds is not None) or (a == "--run" and rid is not None):
+                    raise W.WriteError("bad_request", "%s given more than once" % a)
+                if a == "--date":
+                    ds = args[i + 1]
+                else:
+                    rid = args[i + 1]
+                i += 2
+            elif a.startswith("--") or jid is not None:
+                raise W.WriteError("bad_request", usage)
             else:
-                rid = args[i + 1]
-            i += 2
-        elif a.startswith("--") or jid is not None:
-            raise W.WriteError("bad_request", "usage: chronos api report <job id> [--date <date_key>] [--run <run_id>]")
-        else:
-            jid = a
-            i += 1
-    if not jid or not C.ID_RE.match(jid):
+                jid = a
+                i += 1
+    if not isinstance(jid, str) or not C.ID_RE.match(jid):
         raise W.WriteError("bad_request", "report takes a job id")
-    if ds is not None and not RL.DS_RE.match(ds):
-        raise W.WriteError("bad_request", "--date must look like YYYY-MM-DD")
-    if rid is not None and not RL.RUN_ID_RE.match(rid):
+    if ds is not None and not _valid_date(ds):
+        raise W.WriteError("bad_request", "--date must be a real date like YYYY-MM-DD")
+    if rid is not None and not _valid_run_id(rid):
         raise W.WriteError("bad_request", "--run must look like r_ followed by 26 characters of a ULID")
     return jid, ds, rid
 
 
-def report(cfg, args):
+def _read_capped(cfg, path):
+    """-> (text, truncated) from a regular file that really lives inside the reports folder, or None when it is missing or unsafe
+    (a symlink, or anything whose realpath leaves reports/). Reads at most REPORT_MAX + 1 bytes."""
+    if not os.path.lexists(path):
+        return None
+    root = os.path.realpath(cfg["reports_dir"])
+    if os.path.islink(path) or os.path.dirname(os.path.realpath(path)) != root:
+        raise W.WriteError("not_found", "no report stored for that run")
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        raise W.WriteError("not_found", "no report stored for that run")
+    with os.fdopen(fd, "rb") as fh:
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            raise W.WriteError("not_found", "no report stored for that run")
+        data = fh.read(REPORT_MAX + 1)
+    truncated = len(data) > REPORT_MAX
+    dec = codecs.getincrementaldecoder("utf-8")("replace")
+    return dec.decode(data[:REPORT_MAX], final=not truncated), truncated      # a character cut at the cap is dropped, bad bytes become U+FFFD
+
+
+def report(cfg, args, stdin=None):
     """The stored report of one run, read only. Which run: --run (its date_key comes from its row), else the latest run of --date,
     else the newest run. A run's own report file is preferred; the per-day copy is used when this run is the latest of its day."""
-    jid, ds, rid = _report_args(args)
+    jid, ds, rid = _report_args(args, stdin if stdin is not None else sys.stdin)
     if not any(isinstance(j, dict) and j.get("id") == jid for j in W.read_jobs(cfg)):
         raise W.WriteError("not_found", "no such job")
-    rows = [r for r in RL.run_rows(cfg, jid) if RL.DS_RE.match(str(r.get("ds")))]
+    # ids that come from the run log are validated exactly like --run before any path is built from them
+    rows = [r for r in RL.run_rows(cfg, jid) if _valid_date(r.get("ds")) and _valid_run_id(r.get("run_id"))]
     rows.sort(key=lambda r: (str(r.get("ds")), float(r.get("start_ts") or 0)))
     row = None
     if rid is not None:
@@ -257,21 +310,26 @@ def report(cfg, args):
             raise W.WriteError("not_found", "no runs for this job")
         ds = newest[0]["ds"]
         row = next((r for r in reversed(rows) if r.get("ds") == ds), None)
-    path = None
     latest = next((r for r in reversed(rows) if r.get("ds") == ds), None)
-    if row is not None and os.path.isfile(RL.run_report_path(cfg, jid, ds, row["run_id"])):
-        path = RL.run_report_path(cfg, jid, ds, row["run_id"])
-    elif os.path.isfile(C.report_path(cfg, jid, ds)) and (row is None or row is latest):
-        path = C.report_path(cfg, jid, ds)
-    if path is None:
+    got = _read_capped(cfg, RL.run_report_path(cfg, jid, ds, row["run_id"])) if row is not None else None
+    if got is None and (row is None or row is latest):
+        got = _read_capped(cfg, C.report_path(cfg, jid, ds))
+    if got is None:
         raise W.WriteError("not_found", "no report stored for that run")
-    text, truncated = _trim_bytes(C._read_bytes(path), REPORT_MAX)
+    text, truncated = got
     run = RL.schedule_run(cfg, row) if row is not None else {}
     out = {"job_id": jid, "date_key": ds, "run_id": row.get("run_id") if row else None, "status": run.get("status"),
            "runner": run.get("runner"), "started_at": run.get("started_at"), "ended_at": run.get("ended_at"),
            "report": text, "truncated": truncated}
-    if run.get("late_note"):
-        out["late_note"] = run["late_note"]
+    if row is not None:
+        try:
+            note = _read_capped(cfg, os.path.join(cfg["reports_dir"], "%s-%s-%s.late.md" % (jid, ds, row["run_id"])))
+        except W.WriteError:
+            note = None
+        if note is not None and note[0].strip():
+            out["late_note"] = note[0].strip()
+            if note[1]:
+                out["late_note_truncated"] = True
     return out
 
 
@@ -493,7 +551,7 @@ def dispatch(argv, cfg, stdin, stderr):
     if verb == "migrate":
         return migrate(cfg, args, stdin, stderr)
     if verb == "report":
-        return report(cfg, args)
+        return report(cfg, args, stdin)
     if verb in RUN_VERBS:
         try:
             return RUN_VERBS[verb](cfg, args, stdin)

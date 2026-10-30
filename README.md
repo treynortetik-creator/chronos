@@ -413,7 +413,7 @@ echo '{"scope": {"id": "daily-digest"}, "paused": true}' | chronos api pause
 | Verb | In | Out |
 |---|---|---|
 | `version` | none | `api` (the major; the same major is compatible), `chronos`, `session_runner`, `approval_required` |
-| `snapshot` | none | `tz`, `as_of`, `session_runner`, `approval_required`, `paused_all`, `session_beat_age_s`, `tick_age_s`, `schedules[]`. Each schedule has `ds` (the day Chronos is showing: today, or yesterday while yesterday's window is open) and `date_key` (the date its claim and markers are stored under: equal to `ds` for a recurring job; for a one-shot, the date it was set for, even when that is not today or has passed) |
+| `snapshot` | none | `tz`, `as_of`, `session_runner`, `approval_required`, `paused_all`, `session_beat_age_s`, `tick_age_s`, `schedules[]`. Each schedule has `ds` (the day Chronos is showing: today, or yesterday while yesterday's window is open) and `date_key` (the date its claim and markers are stored under: always equal to `ds` for a recurring job, including after midnight while yesterday's window is open; for a one-shot, the date it was set for, even when that is not today or has passed) |
 | `detail <id>` | none | `schedule`, `prompt` (at most 64 KiB, `prompt_truncated`), `guard`, `next_runs`, `runs` (the 20 most recent, newest first: `run_id`, `ds`, `status`, `runner`, `started_at`, `ended_at`, `duration_s`, `has_report`; a day with only a failed/stalled marker has `run_id: null`) |
 | `validate` | a change (below) | `ok`, `normalized`, `preview` (`when_text`, `next_runs`, `tz`), `expected_etag`. Never writes |
 | `apply` | `{"change": ..., "expected_etag": ...}` | `{"ok": true, "etag": ...}` |
@@ -423,7 +423,7 @@ echo '{"scope": {"id": "daily-digest"}, "paused": true}' | chronos api pause
 | `due --for session` | none | `due[]` of `{id, ds, fire_at, window_ends}`, and it refreshes the session heartbeat |
 | `session-beat` | none | refreshes the session heartbeat |
 | `approved <id>` | none | the approved record, or `null` |
-| `report <id> [--date <date_key>] [--run <run_id>]` | none | read-only: `job_id`, `date_key`, `run_id`, `status`, `runner`, `started_at`, `ended_at`, `report` (at most 256 KiB, `truncated`), `late_note` when one exists. `--run` picks that run (its date comes from its row); `--date` the latest run of that day; neither, the newest run. Both given must agree. Not found when the job, run or date does not exist or the run has no stored report. Writes nothing |
+| `report <id> [--date <date_key>] [--run <run_id>]` | none | read-only: `job_id`, `date_key`, `run_id`, `status`, `runner`, `started_at`, `ended_at`, `report` (at most 256 KiB, `truncated`), `late_note` (whole, with `late_note_truncated: true` if it was cut at the cap) when one exists. The id may instead come as JSON on stdin (`{"id": ..., "date": ..., "run": ...}`), like `detail`. A symlink, or anything whose real path is outside the reports folder, is treated as not stored. A repeated flag is `bad_request`. `--run` picks that run (its date comes from its row); `--date` the latest run of that day; neither, the newest run. Both given must agree. Not found when the job, run or date does not exist or the run has no stored report. Writes nothing |
 | `migrate` | answers on stdin | interactive y/N baseline for a 0.2 install; prompts go to stderr, a JSON summary to stdout |
 
 **Run verbs** (0.3.0). A run id is `r_` plus a 26-character ULID: the caller mints it for a session run, Chronos for a background run.
@@ -582,7 +582,7 @@ loopback-only bind, the webhook secret and throttle, and that no event run ever 
 tests/run.sh
 ```
 
-354 tests (tests/test_chronos.py: the 0.2.2 suite, unchanged; tests/test_api_*.py: the 0.3 API), about two minutes. They cover the tick's due logic with a fake clock (grace, catch-up, days,
+374 tests (tests/test_chronos.py: the 0.2.2 suite, unchanged; tests/test_api_*.py: the 0.3 API), about two minutes. They cover the tick's due logic with a fake clock (grace, catch-up, days,
 markers, pause, one-shots, a broken `jobs.json`), concurrent claims, the run script against a fake
 `claude` (success, failure, watchdog, one-shot disabling, the plugin-disable flags), the hook, the UI's auth
 and path rules, and for 0.2.0: every trigger type (baselines, settling, rate limit, missing Gmail/`gh`
