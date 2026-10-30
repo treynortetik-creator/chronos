@@ -21,6 +21,7 @@
     "next_run": "2026-10-06T07:30:00-04:00",
     "today": "waiting",
     "ds": "2026-10-05",
+    "date_key": "2026-10-05",
     "window_ends": "2026-10-05T10:30:00-04:00",
     "last_run": null,
     "prompt_preview": "Summarise yesterday's activity and post it.\n",

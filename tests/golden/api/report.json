@@ -1,0 +1,12 @@
+{
+  "job_id": "run-session",
+  "date_key": "2026-10-05",
+  "run_id": "r_00000000000000000000000001",
+  "status": "ok",
+  "runner": "session",
+  "started_at": "2026-10-05T07:45:00-04:00",
+  "ended_at": "2026-10-05T07:45:00-04:00",
+  "report": "Posted the summary.\n",
+  "truncated": false,
+  "late_note": "Too late."
+}

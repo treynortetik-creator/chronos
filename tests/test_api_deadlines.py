@@ -65,13 +65,17 @@ class Deadlines(unittest.TestCase):
         self.assertTrue(self.e.wait_for(lambda: os.path.exists(os.path.join(self.e.cfg["state_dir"], "ran-alpha-2026-10-05"))), "the clock job should still have run")
 
     def test_a_normal_tick_logs_no_deadline_and_leaves_no_watchdog_behind(self):
-        r = self.e.run(["/bin/bash", TICK], CHRONOS_NOW=NOW)
-        self.assertEqual(r.returncode, 0, r.stderr)
+        # The tick runs as its own session, so its process group holds only what it started. Unrelated processes elsewhere on the
+        # machine (any other `sleep 2...`) cannot make this fail. The watchdog is exactly `sleep <step_deadline_s>`.
+        tick = subprocess.Popen(["/bin/bash", TICK], env=self.e.env(CHRONOS_NOW=NOW), start_new_session=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        _, err = tick.communicate(timeout=60)
+        self.assertEqual(tick.returncode, 0, err)
         self.assertTrue(self.e.wait_for(lambda: os.path.exists(os.path.join(self.e.cfg["state_dir"], "ran-alpha-2026-10-05"))))
         self.assertNotIn("DEADLINE", self.log())
         time.sleep(0.5)
-        r = subprocess.run(["pgrep", "-f", "sleep 2"], capture_output=True, text=True)
-        self.assertEqual([p for p in r.stdout.split() if p != str(os.getpid())], [], "a deadline watchdog outlived the step it guarded")
+        r = subprocess.run(["pgrep", "-g", str(tick.pid), "-f", "^sleep 2$"], capture_output=True, text=True)
+        self.assertEqual(r.stdout.split(), [], "a deadline watchdog outlived the step it guarded")
 
 
 if __name__ == "__main__":
