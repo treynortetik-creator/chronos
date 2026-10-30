@@ -135,6 +135,8 @@ def generate(out_dir):
         run("finish-ok", ["finish", "run-session"], {"run_id": rid1, "status": "ok", "report": "Posted the summary.\n"})
         run("finish-late", ["finish", "run-session"], {"run_id": rid1, "status": "ok", "report": "Too late.\n"})
         run("detail-with-runs", ["detail", "run-session"])
+        run("report", ["report", "run-session", "--run", rid1])
+        run("report-not-found", ["report", "run-session", "--run", rid2], expect=1)
         run("session-prompt", ["session-prompt", "run-session"])
         hand_job({"id": "hand-session", "name": "Hand Session", "description": "written by hand", "time": "08:00", "days": "daily",
                   "catchup_min": 180, "enabled": True, "in_session": True, "headless": False, "notify": "failure", "once": None,

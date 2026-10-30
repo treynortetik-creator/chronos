@@ -7,9 +7,9 @@ Python 3.9+, standard library only.
           {"error": {"code": "...", "message": "...", "fields": [{"path": "...", "message": "..."}]}}.
   Times   every instant is RFC 3339 with an offset (2026-07-15T09:00:00-04:00); `tz` is an IANA zone name.
 
-Verbs (0.3.0): version, snapshot, detail <id>, validate, apply, pause, disable <id>, config set, due --for session,
-session-beat, approved <id>, migrate. The run verbs (claim, finish, start, session-prompt, health, probe, orphans) arrive in
-the next release candidate.
+Verbs: version, snapshot, detail <id>, validate, apply, pause, disable <id>, config set, due --for session,
+session-beat, approved <id>, migrate, and the run verbs (claim, finish, start, session-prompt, health, probe, orphans).
+`report <id> [--date <date_key>] [--run <run_id>]` reads one stored run report and writes nothing.
 """
 import json
 import os
@@ -135,7 +135,7 @@ def describe(cfg, job, at, beat_age, rows=None):
         "runner": runner or "headless", "permissions": C.job_permissions(job),
         "allowed_tools": list(job.get("allowed_tools") or []), "model": job.get("model") or None,
         "notify": C.job_notify_mode(job), "triggers_count": len(job.get("triggers") or []),
-        "next_run": C.aware_iso(nf[0]) if nf else None, "today": state, "ds": C.day_str(d), "window_ends": fire_end,
+        "next_run": C.aware_iso(nf[0]) if nf else None, "today": state, "ds": C.day_str(d), "date_key": C.date_key(job, at), "window_ends": fire_end,
         "last_run": last,
         "prompt_preview": _strip_controls(prompt_text)[:PREVIEW_CHARS] if not C.is_command(job) else "",
         "prompt_bytes": len(pb), "editable": editable, "read_only_reason": why,
@@ -201,6 +201,78 @@ def detail(cfg, jid):
     guard = _trim_bytes(gb, DETAIL_GUARD_MAX)[0] if os.path.isfile(C.guard_file(cfg, jid)) else None
     nf = [C.aware_iso(x) for x in C.next_fires(job, at, 3)] if job.get("enabled") is True else []
     return {"schedule": s, "prompt": prompt, "prompt_truncated": truncated, "guard": guard, "next_runs": nf, "runs": _recent_runs(cfg, jid)}
+
+
+REPORT_MAX = 256 * 1024
+
+
+def _report_args(args):
+    """-> (job id, date_key or None, run id or None); anything else is bad_request."""
+    jid, ds, rid, i = None, None, None, 0
+    while i < len(args):
+        a = args[i]
+        if a in ("--date", "--run"):
+            if i + 1 >= len(args) or args[i + 1].startswith("--"):
+                raise W.WriteError("bad_request", "%s needs a value" % a)
+            if a == "--date":
+                ds = args[i + 1]
+            else:
+                rid = args[i + 1]
+            i += 2
+        elif a.startswith("--") or jid is not None:
+            raise W.WriteError("bad_request", "usage: chronos api report <job id> [--date <date_key>] [--run <run_id>]")
+        else:
+            jid = a
+            i += 1
+    if not jid or not C.ID_RE.match(jid):
+        raise W.WriteError("bad_request", "report takes a job id")
+    if ds is not None and not RL.DS_RE.match(ds):
+        raise W.WriteError("bad_request", "--date must look like YYYY-MM-DD")
+    if rid is not None and not RL.RUN_ID_RE.match(rid):
+        raise W.WriteError("bad_request", "--run must look like r_ followed by 26 characters of a ULID")
+    return jid, ds, rid
+
+
+def report(cfg, args):
+    """The stored report of one run, read only. Which run: --run (its date_key comes from its row), else the latest run of --date,
+    else the newest run. A run's own report file is preferred; the per-day copy is used when this run is the latest of its day."""
+    jid, ds, rid = _report_args(args)
+    if not any(isinstance(j, dict) and j.get("id") == jid for j in W.read_jobs(cfg)):
+        raise W.WriteError("not_found", "no such job")
+    rows = [r for r in RL.run_rows(cfg, jid) if RL.DS_RE.match(str(r.get("ds")))]
+    rows.sort(key=lambda r: (str(r.get("ds")), float(r.get("start_ts") or 0)))
+    row = None
+    if rid is not None:
+        row = next((r for r in reversed(rows) if r.get("run_id") == rid), None)
+        if row is None:
+            raise W.WriteError("not_found", "no such run")
+        if ds is not None and row.get("ds") != ds:
+            raise W.WriteError("not_found", "that run belongs to another date_key")
+        ds = row["ds"]
+    elif ds is not None:
+        row = next((r for r in reversed(rows) if r.get("ds") == ds), None)
+    else:
+        newest = _recent_runs(cfg, jid, rows)
+        if not newest:
+            raise W.WriteError("not_found", "no runs for this job")
+        ds = newest[0]["ds"]
+        row = next((r for r in reversed(rows) if r.get("ds") == ds), None)
+    path = None
+    latest = next((r for r in reversed(rows) if r.get("ds") == ds), None)
+    if row is not None and os.path.isfile(RL.run_report_path(cfg, jid, ds, row["run_id"])):
+        path = RL.run_report_path(cfg, jid, ds, row["run_id"])
+    elif os.path.isfile(C.report_path(cfg, jid, ds)) and (row is None or row is latest):
+        path = C.report_path(cfg, jid, ds)
+    if path is None:
+        raise W.WriteError("not_found", "no report stored for that run")
+    text, truncated = _trim_bytes(C._read_bytes(path), REPORT_MAX)
+    run = RL.schedule_run(cfg, row) if row is not None else {}
+    out = {"job_id": jid, "date_key": ds, "run_id": row.get("run_id") if row else None, "status": run.get("status"),
+           "runner": run.get("runner"), "started_at": run.get("started_at"), "ended_at": run.get("ended_at"),
+           "report": text, "truncated": truncated}
+    if run.get("late_note"):
+        out["late_note"] = run["late_note"]
+    return out
 
 
 def approved(cfg, jid):
@@ -420,6 +492,8 @@ def dispatch(argv, cfg, stdin, stderr):
         return approved(cfg, jid)
     if verb == "migrate":
         return migrate(cfg, args, stdin, stderr)
+    if verb == "report":
+        return report(cfg, args)
     if verb in RUN_VERBS:
         try:
             return RUN_VERBS[verb](cfg, args, stdin)

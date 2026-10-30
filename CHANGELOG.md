@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- `chronos api snapshot` (and `detail.schedule`): every schedule now carries `date_key`, the date its claim and markers are keyed on. For a recurring job it equals `ds`; for a one-shot it is the date the job was set for, which `ds` (today) did not show. Additive: no field was renamed or changed.
+- New read-only verb `chronos api report <id> [--date <date_key>] [--run <run_id>]`: the stored report of one run as JSON, same envelope and error codes as the other verbs (`not_found`, `bad_request`). New goldens `report`, `report-not-found`; new tests in `tests/test_oneshot_report.py`.
+
 ## 0.3.1 - 2026-10-29
 
 Two gaps in the 0.3.0 API, found by the Talos integration.

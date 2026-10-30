@@ -413,7 +413,7 @@ echo '{"scope": {"id": "daily-digest"}, "paused": true}' | chronos api pause
 | Verb | In | Out |
 |---|---|---|
 | `version` | none | `api` (the major; the same major is compatible), `chronos`, `session_runner`, `approval_required` |
-| `snapshot` | none | `tz`, `as_of`, `session_runner`, `approval_required`, `paused_all`, `session_beat_age_s`, `tick_age_s`, `schedules[]` |
+| `snapshot` | none | `tz`, `as_of`, `session_runner`, `approval_required`, `paused_all`, `session_beat_age_s`, `tick_age_s`, `schedules[]`. Each schedule has `ds` (the day Chronos is showing: today, or yesterday while yesterday's window is open) and `date_key` (the date its claim and markers are stored under: equal to `ds` for a recurring job; for a one-shot, the date it was set for, even when that is not today or has passed) |
 | `detail <id>` | none | `schedule`, `prompt` (at most 64 KiB, `prompt_truncated`), `guard`, `next_runs`, `runs` (the 20 most recent, newest first: `run_id`, `ds`, `status`, `runner`, `started_at`, `ended_at`, `duration_s`, `has_report`; a day with only a failed/stalled marker has `run_id: null`) |
 | `validate` | a change (below) | `ok`, `normalized`, `preview` (`when_text`, `next_runs`, `tz`), `expected_etag`. Never writes |
 | `apply` | `{"change": ..., "expected_etag": ...}` | `{"ok": true, "etag": ...}` |
@@ -423,6 +423,7 @@ echo '{"scope": {"id": "daily-digest"}, "paused": true}' | chronos api pause
 | `due --for session` | none | `due[]` of `{id, ds, fire_at, window_ends}`, and it refreshes the session heartbeat |
 | `session-beat` | none | refreshes the session heartbeat |
 | `approved <id>` | none | the approved record, or `null` |
+| `report <id> [--date <date_key>] [--run <run_id>]` | none | read-only: `job_id`, `date_key`, `run_id`, `status`, `runner`, `started_at`, `ended_at`, `report` (at most 256 KiB, `truncated`), `late_note` when one exists. `--run` picks that run (its date comes from its row); `--date` the latest run of that day; neither, the newest run. Both given must agree. Not found when the job, run or date does not exist or the run has no stored report. Writes nothing |
 | `migrate` | answers on stdin | interactive y/N baseline for a 0.2 install; prompts go to stderr, a JSON summary to stdout |
 
 **Run verbs** (0.3.0). A run id is `r_` plus a 26-character ULID: the caller mints it for a session run, Chronos for a background run.
@@ -446,7 +447,7 @@ session notifies once per `(id, ds)`, with `CHRONOS_JOB` exported. Each run keep
 
 **Errors** are `{"error": {"code": "...", "message": "...", "fields": [{"path": "...", "message": "..."}]}}` with exit 1. Codes:
 `schedule_invalid` (the `fields` say which input), `schedule_conflict` (stale etag, the id already exists), `not_found`,
-`both_jobs_remain`, `bad_request`, `unknown_verb`.
+`both_jobs_remain`, `bad_request`, `unknown_verb`. `report` returns `not_found` for an unknown job, run or date, or a run with no stored report, and `bad_request` for a malformed id, date or flag.
 
 **Times.** Every instant is RFC 3339 with an offset (`2026-07-15T09:00:00-04:00`), and `tz` is an IANA zone name: `$TZ` if it
 names one, otherwise the zone `/etc/localtime` points at. A local time that does not exist (spring forward) fires at the next
@@ -581,7 +582,7 @@ loopback-only bind, the webhook secret and throttle, and that no event run ever 
 tests/run.sh
 ```
 
-261 tests (tests/test_chronos.py: the 0.2.2 suite, unchanged; tests/test_api_*.py: the 0.3 API), about two minutes. They cover the tick's due logic with a fake clock (grace, catch-up, days,
+354 tests (tests/test_chronos.py: the 0.2.2 suite, unchanged; tests/test_api_*.py: the 0.3 API), about two minutes. They cover the tick's due logic with a fake clock (grace, catch-up, days,
 markers, pause, one-shots, a broken `jobs.json`), concurrent claims, the run script against a fake
 `claude` (success, failure, watchdog, one-shot disabling, the plugin-disable flags), the hook, the UI's auth
 and path rules, and for 0.2.0: every trigger type (baselines, settling, rate limit, missing Gmail/`gh`
