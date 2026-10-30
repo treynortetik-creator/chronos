@@ -542,7 +542,11 @@ def dispatch(argv, cfg, stdin, stderr):
         if args[:2] != ["--for", "session"]:
             raise W.WriteError("bad_request", "usage: chronos api due --for session")
         beat = C.write_session_beat(cfg)
-        return {"due": C.due_for_session(cfg), "beat": beat}
+        try:
+            due = C.due_for_session(cfg)
+        except (ValueError, OSError) as e:
+            raise W.WriteError("registry_unreadable", "jobs file unreadable (%s): %s" % (cfg["jobs_file"], e))
+        return {"due": due, "beat": beat}
     if verb == "session-beat":
         return {"ok": True, "beat": C.write_session_beat(cfg)}
     if verb == "approved":

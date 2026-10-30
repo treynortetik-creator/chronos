@@ -201,9 +201,14 @@ def shell_env(cfg):
 
 # --------------------------------------------------------------------------- jobs file
 def load_jobs(cfg=None):
+    """Every job record. A new install has no jobs.json yet: that is an empty registry, not an error. A file that exists
+    but cannot be read or parsed still raises."""
     cfg = cfg or load_config()
-    with open(cfg["jobs_file"], encoding="utf-8") as fh:
-        data = json.load(fh)
+    try:
+        with open(cfg["jobs_file"], encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return []
     if not isinstance(data, list):
         raise ValueError("jobs.json is not a list")
     return data
