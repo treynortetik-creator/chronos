@@ -71,7 +71,13 @@ def _recent_runs(cfg, jid, rows=None):
     """Newest first, at most DETAIL_RUNS_MAX: every run row of this job, plus a bare entry for a day that only has a
     failed-/stalled-/ran- marker (no run row)."""
     rows = [r for r in (rows if rows is not None else RL.run_rows(cfg, jid)) if r.get("job") == jid]
-    out = [(str(r.get("ds") or ""), float(r.get("start_ts") or 0), RL.schedule_run(cfg, r)) for r in rows]
+    out = []
+    for r in rows:
+        try:
+            ts = float(r.get("start_ts") or 0)
+        except (ValueError, TypeError):
+            ts = 0.0             # a hand-edited or old row: keep it, sort it first within its day
+        out.append((str(r.get("ds") or ""), ts, RL.schedule_run(cfg, r)))
     seen = set(x[0] for x in out)
     try:
         names = os.listdir(cfg["state_dir"])
@@ -542,7 +548,11 @@ def dispatch(argv, cfg, stdin, stderr):
         if args[:2] != ["--for", "session"]:
             raise W.WriteError("bad_request", "usage: chronos api due --for session")
         beat = C.write_session_beat(cfg)
-        return {"due": C.due_for_session(cfg), "beat": beat}
+        try:
+            due = C.due_for_session(cfg)
+        except (ValueError, OSError) as e:
+            raise W.WriteError("registry_unreadable", "jobs file unreadable (%s): %s" % (cfg["jobs_file"], e))
+        return {"due": due, "beat": beat}
     if verb == "session-beat":
         return {"ok": True, "beat": C.write_session_beat(cfg)}
     if verb == "approved":

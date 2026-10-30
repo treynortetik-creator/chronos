@@ -513,7 +513,10 @@ def schedule_run(cfg, row):
     out = {"run_id": rid, "ds": ds, "started_at": row.get("started_at"), "runner": row.get("runner") or "headless",
            "trigger": row.get("trigger_kind") or "clock", "status": row.get("status") or ("ok" if row.get("ok") else "failed")}
     if row.get("duration_s") is not None:
-        out["duration_s"] = int(row["duration_s"])
+        try:
+            out["duration_s"] = int(float(row["duration_s"]))
+        except (ValueError, TypeError, OverflowError):
+            pass                 # a non-numeric duration (hand edit, old writer) is left out, not fatal
     if row.get("runner") == "headless" and isinstance(row.get("cost_usd"), (int, float)):
         out["cost_usd"] = row["cost_usd"]
     out["has_report"] = bool(has_report)

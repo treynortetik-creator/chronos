@@ -65,7 +65,16 @@ def main(argv):
         for jid, ds in due:
             print("%s|%s" % (jid, ds))
     elif cmd == "list":
-        for j in C.load_jobs(cfg):
+        try:
+            jobs = C.load_jobs(cfg)
+        except (ValueError, OSError) as e:
+            sys.stderr.write("jobs file unreadable (%s): %s\n" % (cfg["jobs_file"], e))
+            return 3
+        bad = [j for j in jobs if not isinstance(j, dict) or "id" not in j]
+        if bad:
+            sys.stderr.write("jobs file unreadable (%s): %d entr%s not a job object with an id\n" % (cfg["jobs_file"], len(bad), "y is" if len(bad) == 1 else "ies are"))
+            return 3
+        for j in jobs:
             nf = C.next_fires(j, C.now(), 1) if j.get("enabled") else []
             print("%-24s %-34s %-9s next: %s" % (j["id"], C.english(j), "on" if j.get("enabled") else "disabled",
                                                  C.iso(nf[0]) if nf else "-"))
@@ -115,7 +124,12 @@ def main(argv):
     elif cmd == "runlog":
         return RL.main(args, cfg)
     elif cmd == "field" and len(args) == 2:
-        job = next((j for j in C.load_jobs(cfg) if j.get("id") == args[0]), {})
+        try:
+            jobs = C.load_jobs(cfg)
+        except (ValueError, OSError) as e:
+            sys.stderr.write("jobs file unreadable (%s): %s\n" % (cfg["jobs_file"], e))
+            return 3
+        job = next((j for j in jobs if isinstance(j, dict) and j.get("id") == args[0]), {})
         v = C.job_notify_mode(job) if args[1] == "notify" else job.get(args[1], "")
         print("" if v is None else v)
     elif cmd == "disable-once" and args:
