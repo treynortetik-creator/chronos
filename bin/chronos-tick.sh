@@ -14,7 +14,8 @@
 # After the clock jobs, an EVENT pass (v0.2.0) evaluates the triggers of every job that has any (file, gmail, github,
 # webhook) and starts one run per event, with the same atomic claim. Event runs are untrusted: see chronos-run.sh.
 #
-# If jobs.json is missing or unparsable the tick logs the error and does nothing (never crash-loops).
+# No jobs.json yet is an empty registry (nothing due). If jobs.json cannot be read or parsed, or its directory is missing,
+# the tick logs the error and does nothing (never crash-loops).
 set -u
 DIR="$(cd "$(dirname "$0")" && pwd)"
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -35,7 +36,7 @@ if [ "$RC" -ne 0 ]; then
   if [ "$RC" -eq 137 ]; then
     echo "$(date '+%F %T') TICK-ERROR the due check was killed at its deadline; this tick does nothing, the next one tries again" >> "$CH_LOGS/chronos.log"
   else
-    echo "$(date '+%F %T') TICK-ERROR jobs file missing or unparsable ($CH_JOBS_FILE); doing nothing" >> "$CH_LOGS/chronos.log"
+    echo "$(date '+%F %T') TICK-ERROR jobs file unreadable or its directory is missing ($CH_JOBS_FILE); doing nothing" >> "$CH_LOGS/chronos.log"
   fi
   exit 0
 fi

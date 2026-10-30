@@ -71,7 +71,13 @@ def _recent_runs(cfg, jid, rows=None):
     """Newest first, at most DETAIL_RUNS_MAX: every run row of this job, plus a bare entry for a day that only has a
     failed-/stalled-/ran- marker (no run row)."""
     rows = [r for r in (rows if rows is not None else RL.run_rows(cfg, jid)) if r.get("job") == jid]
-    out = [(str(r.get("ds") or ""), float(r.get("start_ts") or 0), RL.schedule_run(cfg, r)) for r in rows]
+    out = []
+    for r in rows:
+        try:
+            ts = float(r.get("start_ts") or 0)
+        except (ValueError, TypeError):
+            ts = 0.0             # a hand-edited or old row: keep it, sort it first within its day
+        out.append((str(r.get("ds") or ""), ts, RL.schedule_run(cfg, r)))
     seen = set(x[0] for x in out)
     try:
         names = os.listdir(cfg["state_dir"])

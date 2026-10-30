@@ -200,14 +200,24 @@ def shell_env(cfg):
 
 
 # --------------------------------------------------------------------------- jobs file
+class JobsDirMissing(OSError):
+    """jobs_file points into a directory that does not exist. Deliberately not a FileNotFoundError, so the callers that
+    read "no jobs.json" as an empty registry do not swallow it."""
+
+
 def load_jobs(cfg=None):
     """Every job record. A new install has no jobs.json yet: that is an empty registry, not an error. A file that exists
-    but cannot be read or parsed still raises."""
+    but cannot be read or parsed still raises, and so does a configured jobs_file whose directory is missing (a typo, an
+    unmounted volume, a sync folder that is not there). Only the default location may be wholly absent (nothing set up yet)."""
     cfg = cfg or load_config()
     try:
         with open(cfg["jobs_file"], encoding="utf-8") as fh:
             data = json.load(fh)
     except FileNotFoundError:
+        parent = os.path.dirname(os.path.abspath(cfg["jobs_file"]))
+        default = os.path.abspath(os.path.expanduser(DEFAULTS["jobs_file"]))
+        if not os.path.isdir(parent) and os.path.abspath(cfg["jobs_file"]) != default:
+            raise JobsDirMissing("the directory %s does not exist" % parent)
         return []
     if not isinstance(data, list):
         raise ValueError("jobs.json is not a list")

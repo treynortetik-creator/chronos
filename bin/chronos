@@ -70,6 +70,10 @@ def main(argv):
         except (ValueError, OSError) as e:
             sys.stderr.write("jobs file unreadable (%s): %s\n" % (cfg["jobs_file"], e))
             return 3
+        bad = [j for j in jobs if not isinstance(j, dict) or "id" not in j]
+        if bad:
+            sys.stderr.write("jobs file unreadable (%s): %d entr%s not a job object with an id\n" % (cfg["jobs_file"], len(bad), "y is" if len(bad) == 1 else "ies are"))
+            return 3
         for j in jobs:
             nf = C.next_fires(j, C.now(), 1) if j.get("enabled") else []
             print("%-24s %-34s %-9s next: %s" % (j["id"], C.english(j), "on" if j.get("enabled") else "disabled",
