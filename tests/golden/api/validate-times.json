@@ -1,0 +1,43 @@
+{
+  "ok": true,
+  "normalized": {
+    "op": "create",
+    "draft": {
+      "id": "multi-run",
+      "name": "Multi Run",
+      "description": "Example job",
+      "when": {
+        "type": "times",
+        "days": "weekdays",
+        "times": [
+          "07:30",
+          "10:00",
+          "14:00"
+        ]
+      },
+      "catchup_min": 180,
+      "enabled": true,
+      "runner": "headless",
+      "permissions": "full",
+      "allowed_tools": [],
+      "model": null,
+      "notify": "failure",
+      "prompt": "Summarise yesterday's activity and post it.\n",
+      "meta": {
+        "sources": [
+          "inbox"
+        ]
+      }
+    }
+  },
+  "preview": {
+    "when_text": "Weekdays at 7:30 AM, 10:00 AM and 2:00 PM",
+    "next_runs": [
+      "2026-10-05T10:00:00-04:00",
+      "2026-10-05T14:00:00-04:00",
+      "2026-10-06T07:30:00-04:00"
+    ],
+    "tz": "America/New_York"
+  },
+  "expected_etag": "sha256:6cd7af39084bd8bc4c87ed1484bce31c3c03bdfddc8c2762c363773643bc66f8"
+}

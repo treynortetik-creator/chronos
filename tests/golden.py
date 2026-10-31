@@ -154,6 +154,20 @@ def generate(out_dir):
         run("health", ["health"])
         run("probe-stalled", ["probe"], {}, extra=dict(probe_env, FAKE_MODE="hang"))
         run("probe", ["probe"], {}, extra=probe_env)
+
+        # ---- a job with several times a day, and `meta` (HB0). Appended last, so every golden above is unchanged.
+        slots3 = ["07:30", "10:00", "14:00"]
+        when3 = {"type": "times", "days": "weekdays", "times": slots3}
+        run("validate-times-error", ["validate"], draft("multi-run", when={"type": "times", "days": "weekdays", "times": ["07:30", "07:40"]}, runner="headless"), expect=1)
+        create("multi-run", golden="times", when=when3, runner="headless", meta={"sources": ["inbox"]})
+        run("snapshot-times", ["snapshot"])
+        r1, r2 = "r_" + "0" * 24 + "11", "r_" + "0" * 24 + "12"
+        sreq = lambda rid, ds: {"run_id": rid, "ds": ds, "fire_at": None, "manual": False, "again": False, "runner": "session", "bridge_instance": "instance-a"}
+        run("claim-times-slot", ["claim", "multi-run"], sreq(r1, "2026-10-05T0730"))
+        run("claim-times-slot-running", ["claim", "multi-run"], sreq(r2, "2026-10-05T0730"))
+        run("claim-times-not-a-slot", ["claim", "multi-run"], sreq(r2, "2026-10-05T0800"))
+        run("finish-times-slot", ["finish", "multi-run"], {"run_id": r1, "status": "ok", "report": "Checked the inbox.\n"})
+        run("detail-times", ["detail", "multi-run"])
     finally:
         shutil.rmtree(home, ignore_errors=True)
     return made

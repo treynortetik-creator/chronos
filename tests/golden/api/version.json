@@ -2,5 +2,9 @@
   "api": 1,
   "chronos": "0.3.1",
   "session_runner": "hook",
-  "approval_required": false
+  "approval_required": false,
+  "features": [
+    "times",
+    "meta"
+  ]
 }

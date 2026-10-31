@@ -1,0 +1,12 @@
+{
+  "error": {
+    "code": "schedule_invalid",
+    "message": "when: times must be at least 15 minutes apart",
+    "fields": [
+      {
+        "path": "draft.when",
+        "message": "times must be at least 15 minutes apart"
+      }
+    ]
+  }
+}

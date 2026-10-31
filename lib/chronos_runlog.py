@@ -379,7 +379,7 @@ def owners(cfg, jid=None):
     except OSError:
         return out
     for n in names:
-        m = re.match(r"^claim-([a-z0-9-]{2,40})-(\d{4}-\d{2}-\d{2})\.owner\.json$", n)
+        m = re.match(r"^claim-([a-z0-9-]{2,40})-(\d{4}-\d{2}-\d{2}(?:T\d{4})?)\.owner\.json$", n)
         if not m or (jid and m.group(1) != jid):
             continue
         o = _read_json(os.path.join(cfg["state_dir"], n))
@@ -403,11 +403,14 @@ def _check_run_id(rid):
         raise RunError("bad_request", "run_id must look like r_ followed by 26 characters of a ULID")
 
 
-def _check_ds(ds):
-    if not isinstance(ds, str) or not DS_RE.match(ds):
-        raise RunError("bad_request", "ds must be YYYY-MM-DD")
+def _check_ds(ds, slot=False):
+    """A run key -> its calendar date. `slot` (the job has `times`) also accepts YYYY-MM-DDTHHMM."""
+    if not isinstance(ds, str) or not (C.SLOT_RE if slot else DS_RE).match(ds):
+        raise RunError("bad_request", "ds must be YYYY-MM-DD%s" % (" or YYYY-MM-DDTHHMM" if slot else ""))
     try:
-        return datetime.date.fromisoformat(ds)
+        if len(ds) > 10 and (int(ds[11:13]) > 23 or int(ds[13:15]) > 59):
+            raise ValueError
+        return datetime.date.fromisoformat(ds[:10])
     except ValueError:
         raise RunError("bad_request", "ds is not a date")
 
@@ -435,10 +438,10 @@ def claim_run(cfg, jid, req, at=None):
     if runner == "session" and (C.is_restricted(job) or C.is_command(job)):
         raise RunError("schedule_invalid", "a restricted or command job never runs in a live session")
     ds = req.get("ds")
-    d = _check_ds(ds) if ds is not None else None
+    d = _check_ds(ds, C.is_times(job)) if ds is not None else None
     if ds is None:
-        ds = C.date_key(job, at)         # Run now: the job's own date rule (a one-shot keeps its `once` date)
-        d = datetime.date.fromisoformat(ds)
+        ds = C.run_now_key(job, at)      # Run now: the job's own date rule (a one-shot keeps its `once` date; a job with `times` gets an ad-hoc key, never a slot)
+        d = datetime.date.fromisoformat(ds[:10])
     if C.is_held(cfg, job):
         return {"ok": False, "reason": "held"}
     if not manual:
@@ -447,9 +450,14 @@ def claim_run(cfg, jid, req, at=None):
         if job.get("once"):
             if C.parse_once(job["once"]).date() != d:
                 return {"ok": False, "reason": "not_due"}
+        elif C.is_times(job):
+            f = dict(C.slots(job, d)).get(ds)             # only one of the job's own slots is claimable without `manual`
+            if f is None:
+                return {"ok": False, "reason": "not_due"}
         elif not C.is_due_day(job, d):
             return {"ok": False, "reason": "not_due"}
-        f = C.fire_dt(job, d)
+        if not C.is_times(job):
+            f = C.fire_dt(job, d)
         if at < f:
             return {"ok": False, "reason": "not_due"}
         if at >= f + datetime.timedelta(minutes=C.window_minutes(job)):
@@ -554,7 +562,7 @@ def finish_run(cfg, jid, req, at=None):
         raise RunError("bad_request", "report must be text of at most %d bytes" % MAX_REPORT_BYTES)
     closed = closed_run(cfg, rid)
     if closed is not None:                                   # an already-closed run: keep what was decided, save the words as a note
-        if closed.get("job") == jid and DS_RE.match(str(closed.get("ds"))) and report:
+        if closed.get("job") == jid and C.SLOT_RE.match(str(closed.get("ds"))) and report:
             _write_text(os.path.join(cfg["reports_dir"], "%s-%s-%s.late.md" % (jid, closed["ds"], rid)), report)
         return {"ok": False, "reason": "late"}
     mine = next(((i, ds, o) for i, ds, o in owners(cfg, jid) if o.get("run_id") == rid and o.get("runner") == "session"), None)   # a headless run is never the bridge's to finish
@@ -628,7 +636,7 @@ def start_headless(cfg, jid, again=False, at=None):
         return _refuse("schedule_invalid", str(e))
     if os.path.exists(cfg["blocked_file"]) and not C.is_command(job):
         return _refuse("headless_blocked", "background runs are off until the launch problem is fixed")
-    ds = C.date_key(job, at)
+    ds = C.run_now_key(job, at)
     if os.path.exists(C.ran_path(cfg, jid, ds)) and not again:
         return _refuse("schedule_invalid", "this job already ran for %s; start it again with again=true" % ds)
     os.makedirs(cfg["state_dir"], exist_ok=True)
@@ -672,7 +680,7 @@ def write_block(cfg, at, jid=None, ds=None, run_id=None, source="watchdog", tcc_
 def stall_run(cfg, jid, ds, run_id, event_hash="", at=None):
     """A launch stall: the `stalled-` marker (never `failed-`; not for an event run), headless.blocked, and the claim released."""
     at = at or C.now()
-    if not C.ID_RE.match(jid or "") or not DS_RE.match(ds or ""):
+    if not C.ID_RE.match(jid or "") or not C.SLOT_RE.match(ds or ""):
         raise RunError("bad_request", "bad id or date")
     os.makedirs(cfg["state_dir"], exist_ok=True)
     if event_hash:
@@ -689,7 +697,7 @@ def open_run(cfg, jid, ds, trigger="clock", event_hash="", at=None, pid=None):
     rid = os.environ.get("CHRONOS_RUN_ID") or ""
     if not RUN_ID_RE.match(rid):
         rid = new_run_id()
-    if not event_hash and C.ID_RE.match(jid or "") and DS_RE.match(ds or ""):
+    if not event_hash and C.ID_RE.match(jid or "") and C.SLOT_RE.match(ds or ""):
         prev = read_owner(cfg, jid, ds)
         claimed = at
         if prev and prev.get("run_id") == rid and prev.get("claimed_at"):
@@ -772,7 +780,7 @@ def health(cfg, at=None):
     stalled = []
     for j in jobs:
         for d in days:
-            if os.path.exists(C.stalled_path(cfg, j["id"], C.day_str(d))):
+            if any(os.path.exists(C.stalled_path(cfg, j["id"], k)) for k in C.marker_keys(j, d)):
                 stalled.append(j["id"])
                 break
     for sid in stalled:
@@ -798,7 +806,14 @@ def health(cfg, at=None):
         try:
             if C.is_held(cfg, j):
                 add("held_jobs", j["id"])
-            if j.get("enabled") is True and C.clock_on(j):
+            if j.get("enabled") is True and C.clock_on(j) and C.is_times(j):
+                # a missed slot is not news when the next one covers it: report only two missed slots in a row
+                born = str(j.get("created") or "")[:10]
+                past = [(f, C.slot_state(cfg, j, d, k, f, at)) for d in days for k, f in C.slots(j, d) if f <= at and not (born and C.day_str(d) < born)]
+                end = lambda f: f + datetime.timedelta(minutes=C.window_minutes(j))
+                if any(a[1] == "missed" and b[1] == "missed" and at - end(b[0]) <= datetime.timedelta(hours=24) for a, b in zip(past, past[1:])):
+                    add("missed_recently", j["id"])
+            elif j.get("enabled") is True and C.clock_on(j):
                 born = str(j.get("created") or "")[:10]
                 for d in ([C.parse_once(j["once"]).date()] if j.get("once") else days):
                     if born and C.day_str(d) < born:
@@ -840,6 +855,12 @@ def stalled_in_window(cfg, at):
         if not isinstance(j, dict) or not C.ID_RE.match(str(j.get("id", ""))) or not C.clock_on(j):
             continue
         try:
+            if C.is_times(j):
+                for d in (at.date() - datetime.timedelta(days=1), at.date()):
+                    for k, f in C.slots(j, d):
+                        if os.path.exists(C.stalled_path(cfg, j["id"], k)) and at < f + datetime.timedelta(minutes=C.window_minutes(j)):
+                            out.append({"id": j["id"], "ds": k})
+                continue
             ds_list = [day_str_of_once(j)] if j.get("once") else [C.day_str(at.date() - datetime.timedelta(days=1)), C.day_str(at.date())]
             for ds in ds_list:
                 if os.path.exists(C.stalled_path(cfg, j["id"], ds)) and at < C.fire_dt(j, datetime.date.fromisoformat(ds)) + datetime.timedelta(minutes=C.window_minutes(j)):
@@ -946,13 +967,17 @@ def wait_notices(cfg, at=None, prev_beat=""):
                 continue
             days = [C.parse_once(j["once"]).date()] if j.get("once") else [at.date() - datetime.timedelta(days=1), at.date()]
             for d in days:
-                if C.day_state(cfg, j, d, at) != "waiting":
+                if C.is_times(j):
+                    cand = [(k, f) for k, f in C.slots(j, d) if C.slot_state(cfg, j, d, k, f, at) == "waiting"]
+                else:
+                    cand = [(C.day_str(d), C.fire_dt(j, d))] if C.day_state(cfg, j, d, at) == "waiting" else []
+                if not cand:
                     continue
-                f = C.fire_dt(j, d)
+                ds, f = cand[0]
                 if at < f + datetime.timedelta(minutes=mins):
                     continue
-                ds = C.day_str(d)
-                marker = os.path.join(cfg["state_dir"], "waitnotified-%s-%s" % (j["id"], ds))
+                # a job with `times` is announced once per DATE (not per slot): the marker carries the date only
+                marker = os.path.join(cfg["state_dir"], "waitnotified-%s-%s" % (j["id"], ds[:10] if C.is_times(j) else ds))
                 try:
                     os.makedirs(cfg["state_dir"], exist_ok=True)
                     os.close(os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))

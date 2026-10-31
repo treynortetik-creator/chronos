@@ -43,6 +43,12 @@ SESSION_RUNNERS = ("hook", "talos")
 ID_RE = re.compile(r"^[a-z0-9-]{2,40}\Z")          # \Z, not $: "$" also matches before a trailing newline
 TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)\Z")
 ONCE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}\Z")
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
+SLOT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(T\d{4})?\Z")        # a run key: a date, or a date and a slot (2026-10-30T0945) for a job with `times`
+TIMES_MAX = 24                         # most slots one job may have
+TIMES_MIN_GAP_MIN = 15                 # Chronos's own floor between two slots (the tick runs every 5 minutes)
+META_MAX_BYTES = 4096                  # canonical JSON size of a job's `meta`
+FEATURES = ["times", "meta"]           # `chronos api version` reports these so a client can tell what this install understands
 DAY_NAMES = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 DAY_LONG = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 NOTIFY_MODES = ("failure", "always", "never")
@@ -240,6 +246,14 @@ def validate_job_record(j):
     if j.get("kind") not in (None,) + JOB_KINDS:
         raise ValueError("kind must be one of %s" % ", ".join(JOB_KINDS))
     check_restricted_field(j)
+    if j.get("times") is not None:
+        parse_times(j["times"])
+        if j.get("once"):
+            raise ValueError("a job with times cannot also be a one-shot")
+        if j.get("time") not in (None, "") and j.get("time") != j["times"][0]:
+            raise ValueError("time must be left out or equal to times[0] when times is set")
+    if j.get("meta") is not None:
+        check_meta(j["meta"])
     if j.get("restricted") is True and j.get("in_session") is True:
         raise ValueError("a restricted job cannot also run in a live session (that run would use the session's permissions, not the restricted list)")
     if j.get("restricted") is True and j.get("kind") == "command":
@@ -443,6 +457,47 @@ def parse_time(t):
     return int(m.group(1)), int(m.group(2))
 
 
+def parse_times(v):
+    """A job's `times`: a list of 1-24 HH:MM strings, strictly ascending, each at least 15 minutes after the one before.
+    -> [(hh, mm), ...]. Raises ValueError."""
+    if not isinstance(v, list):
+        raise ValueError("times must be a list of HH:MM times")
+    if not v:
+        raise ValueError("times needs at least one time")
+    if len(v) > TIMES_MAX:
+        raise ValueError("times holds at most %d times" % TIMES_MAX)
+    out = []
+    for t in v:
+        if not isinstance(t, str) or not TIME_RE.match(t):
+            raise ValueError("every time must be HH:MM, 24 hour")
+        out.append(parse_time(t))
+    mins = [h * 60 + m for h, m in out]
+    for a, b in zip(mins, mins[1:]):
+        if b <= a:
+            raise ValueError("times must be in ascending order, with no repeats")
+        if b - a < TIMES_MIN_GAP_MIN:
+            raise ValueError("times must be at least %d minutes apart" % TIMES_MIN_GAP_MIN)
+    return out
+
+
+def check_meta(meta):
+    """`meta`: an opaque JSON object a client keeps on the job. At most 4 KiB as canonical JSON. Raises ValueError."""
+    if not isinstance(meta, dict):
+        raise ValueError("meta must be a JSON object")
+    try:
+        n = len(canon(meta))
+    except (TypeError, ValueError):
+        raise ValueError("meta must be plain JSON")
+    if n > META_MAX_BYTES:
+        raise ValueError("meta is limited to 4 KiB (this is %d bytes)" % n)
+    return meta
+
+
+def is_times(job):
+    """True for a job that fires at several times a day (the `times` list is set)."""
+    return isinstance(job, dict) and job.get("times") is not None
+
+
 def parse_once(s):
     if not ONCE_RE.match(str(s or "")):
         raise ValueError("one-shot time must look like 2026-10-05T15:00")
@@ -467,8 +522,12 @@ def english(job):
     if job.get("once"):
         dt = parse_once(job["once"])
         return "Once on %s %s %d at %s" % (dt.strftime("%a"), dt.strftime("%b"), dt.day, fmt_clock(dt.hour, dt.minute))
-    hh, mm = parse_time(job["time"])
-    clock = fmt_clock(hh, mm)
+    if is_times(job):
+        names = [fmt_clock(h, m) for h, m in parse_times(job["times"])]
+        clock = names[0] if len(names) == 1 else "%s and %s" % (", ".join(names[:-1]), names[-1])
+    else:
+        hh, mm = parse_time(job["time"])
+        clock = fmt_clock(hh, mm)
     kind, vals = parse_days(job["days"])
     if kind == "daily":
         return "Every day at " + clock
@@ -512,8 +571,26 @@ def fire_dt(job, d):
     the catch-up window starts when the clock actually reaches it."""
     if job.get("once"):
         return valid_local(parse_once(job["once"]))
-    hh, mm = parse_time(job["time"])
+    hh, mm = parse_times(job["times"])[0] if is_times(job) else parse_time(job["time"])
     return valid_local(datetime.datetime(d.year, d.month, d.day, hh, mm))
+
+
+def slots(job, d):
+    """[(run key, fire datetime)] of the job on calendar date d, in time order; [] when it is not scheduled that day.
+    A plain job has one: (the date, its fire time). A job with `times` has one per time, keyed 2026-10-30T0945. A one-shot's key is its own date."""
+    if not clock_on(job):
+        return []
+    if job.get("once"):
+        try:
+            o = parse_once(job["once"])
+        except ValueError:
+            return []
+        return [(day_str(o.date()), valid_local(o))] if o.date() == d else []
+    if not is_due_day(job, d):
+        return []
+    if is_times(job):
+        return [("%sT%02d%02d" % (day_str(d), h, m), valid_local(datetime.datetime(d.year, d.month, d.day, h, m))) for h, m in parse_times(job["times"])]
+    return [(day_str(d), fire_dt(job, d))]
 
 
 def next_fires(job, after, count=3, horizon_days=800):
@@ -528,21 +605,40 @@ def next_fires(job, after, count=3, horizon_days=800):
         return [dt] if dt > after else []
     day = after.date()
     for _ in range(horizon_days):
-        if is_due_day(job, day):
-            f = fire_dt(job, day)
+        for _key, f in slots(job, day):
             if f > after:
                 out.append(f)
                 if len(out) >= count:
-                    break
+                    return out
         day += datetime.timedelta(days=1)
     return out
 
 
 def validate_schedule(fields):
-    """fields: dict with time, days, once, catchup_min. Returns (clean dict, errors list)."""
+    """fields: dict with time, days, once, catchup_min, and optionally times. Returns (clean dict, errors list).
+    With `times` the clean dict also carries `times` and `time` is times[0]; without it the result has no `times` key at all."""
     errors, clean = [], {}
     once = fields.get("once") or None
-    if once:
+    if fields.get("times") is not None:
+        if once:
+            errors.append("a job with times cannot also be a one-shot")
+        else:
+            clean["once"] = None
+            try:
+                tl = parse_times(fields["times"])
+                clean["times"] = list(fields["times"])
+                clean["time"] = fields["times"][0]
+                if fields.get("time") not in (None, "") and fields.get("time") != clean["time"]:
+                    errors.append("time must be left out or equal to the first of times")
+            except ValueError as e:
+                errors.append(str(e))
+            try:
+                clean["days"] = normalize_days(fields.get("days"))
+                if parse_days(clean["days"])[0] == "dom":
+                    errors.append("times works with daily, weekdays or named days, not days of the month")
+            except ValueError as e:
+                errors.append(str(e))
+    elif once:
         try:
             parse_once(once)
             clean["once"] = once
@@ -574,6 +670,8 @@ def validate_schedule(fields):
 
 def cron_for(job):
     """5-field cron for a recurring job (used by the optional SessionStart hook)."""
+    if is_times(job):
+        raise ValueError("a job with times has no single cron schedule; it runs under session_runner talos or in the background")
     hh, mm = parse_time(job["time"])
     kind, vals = parse_days(job["days"])
     if kind == "daily":
@@ -593,7 +691,28 @@ def date_key(job, at):
             return day_str(parse_once(job["once"]).date())
         except ValueError:
             pass
+    if is_times(job):
+        return current_slot_key(job, at)
     return day_str(at.date())
+
+
+def current_slot_key(job, at):
+    """The run key of a job with `times` at instant `at`: its latest slot that has already started (looking back up to a week for a
+    weekday job on a weekend), or the first slot of today when none has."""
+    for back in range(8):
+        d = at.date() - datetime.timedelta(days=back)
+        past = [k for k, f in slots(job, d) if f <= at]
+        if past:
+            return past[-1]
+    return "%sT%02d%02d" % ((day_str(at.date()),) + parse_times(job["times"])[0])
+
+
+def run_now_key(job, at):
+    """The key a manual Run now uses. A plain job: its date key. A job with `times`: an ad-hoc key (today and the minute), which is
+    not one of its slots, so a manual run never consumes a slot."""
+    if is_times(job) and not job.get("once"):
+        return "%sT%02d%02d" % (day_str(at.date()), at.hour, at.minute)
+    return date_key(job, at)
 
 
 def ran_path(cfg, jid, ds):
@@ -711,14 +830,14 @@ def due_jobs(cfg, at=None):
                 continue            # session-only (S2.1): the live session takes it; the tick NEVER spawns it
             jid = j["id"]
             win = int(j.get("catchup_min", 180))
-            slots = []                  # (fire datetime, grace, ds): the one-shot's own date, or yesterday's and today's fire (the midnight rule, S7.5)
+            due_slots = []              # (fire datetime, grace, ds): the one-shot's own date, or yesterday's and today's fires (the midnight rule, S7.5), one per slot
             if j.get("once"):
-                slots.append((fire_dt(j, at.date()), 0, date_key(j, at)))
+                due_slots.append((fire_dt(j, at.date()), 0, date_key(j, at)))
             else:
                 for d in (at.date() - datetime.timedelta(days=1), at.date()):
-                    if is_due_day(j, d):
-                        slots.append((fire_dt(j, d), cfg["grace_min"], day_str(d)))
-            for f, grace, ds in slots:
+                    for ds_, f_ in slots(j, d):
+                        due_slots.append((f_, cfg["grace_min"], ds_))
+            for f, grace, ds in due_slots:
                 if not (f + datetime.timedelta(minutes=grace) <= at < f + datetime.timedelta(minutes=win)):
                     continue
                 if _due_ds(cfg, j, jid, ds):
@@ -770,7 +889,15 @@ def claim(cfg, jid, unattended=False, at=None, ds=None):
         return "NOT_DUE"
     if is_held(cfg, job):
         return "HELD"
-    ds = ds if (ds and re.match(r"^\d{4}-\d{2}-\d{2}$", ds)) else date_key(job, at)     # the tick passes the ds `due` printed (yesterday's, after midnight)
+    if is_times(job):
+        # a slot key is never rewritten into a date key: a key that is not a well-formed run key is refused, not replaced by "today"
+        if ds is not None and ds != "" and not (isinstance(ds, str) and SLOT_RE.match(ds)):
+            return "NOT_DUE"
+        if unattended and ds and ds not in [k for back in (1, 0) for k, _f in slots(job, at.date() - datetime.timedelta(days=back))]:
+            return "NOT_DUE"
+        ds = ds or date_key(job, at)
+    else:
+        ds = ds if (ds and re.match(r"^\d{4}-\d{2}-\d{2}$", ds)) else date_key(job, at)     # the tick passes the ds `due` printed (yesterday's, after midnight)
     os.makedirs(cfg["state_dir"], exist_ok=True)
     cp = claim_path(cfg, jid, ds)
     sweep_stale_claim(cfg, cp, at)
@@ -785,8 +912,21 @@ def claim(cfg, jid, unattended=False, at=None, ds=None):
     return "CLAIMED"
 
 
+def _default_ds(cfg, jid):
+    """The key `done` / `release` use when none is given: today's date, or for a job with `times` its current slot."""
+    try:
+        job = next((j for j in load_jobs(cfg) if isinstance(j, dict) and j.get("id") == jid), None)
+    except Exception:
+        job = None
+    if is_times(job):
+        return date_key(job, now())
+    return day_str(now().date())
+
+
 def release(cfg, jid, ds=None):
-    ds = ds or day_str(now().date())
+    ds = ds or _default_ds(cfg, jid)
+    if not SLOT_RE.match(ds):
+        raise ValueError("bad run key")
     remove_claim(claim_path(cfg, jid, ds))
 
 
@@ -794,13 +934,57 @@ def mark_done(cfg, jid, ds=None):
     """Touch the ran-marker and release the claim."""
     if not ID_RE.match(jid or ""):
         raise ValueError("bad job id")
-    ds = ds or day_str(now().date())
+    ds = ds or _default_ds(cfg, jid)
+    if not SLOT_RE.match(ds):
+        raise ValueError("bad run key")
     os.makedirs(cfg["state_dir"], exist_ok=True)
     open(ran_path(cfg, jid, ds), "a").close()
     release(cfg, jid, ds)
 
 
 # --------------------------------------------------------------------------- event runs (triggers)
+PRUNE_DAYS = 8
+_SLOT_MARKER_RE = re.compile(r"^(ran|failed|stalled|waitnotified|run)-([a-z0-9-]{2,40}?)-(\d{4}-\d{2}-\d{2})(T\d{4})?(\.json)?\Z")
+
+
+def prune_markers(cfg, at=None):
+    """Delete the per-slot markers of a job with `times` once their date is more than PRUNE_DAYS days old (about 1,000 files a year per job
+    otherwise). Touches only ran-, failed-, stalled-, run-*.json and waitnotified- names that carry a slot (T####), plus the date-only
+    waitnotified- marker of a job that currently has `times`. A plain job's markers, claims and approvals are never touched.
+    -> the names removed."""
+    at = at or now()
+    cutoff = at.date() - datetime.timedelta(days=PRUNE_DAYS)
+    try:
+        names = os.listdir(cfg["state_dir"])
+    except OSError:
+        return []
+    try:
+        times_ids = set(j["id"] for j in load_jobs(cfg) if is_times(j) and isinstance(j.get("id"), str))
+    except Exception:
+        times_ids = set()
+    gone = []
+    for n in names:
+        m = _SLOT_MARKER_RE.match(n)
+        if not m:
+            continue
+        kind, jid, date, slot, ext = m.groups()
+        if (kind == "run") != (ext == ".json") or (kind != "run" and ext):
+            continue
+        if not slot and not (kind == "waitnotified" and jid in times_ids):
+            continue
+        try:
+            d = datetime.date.fromisoformat(date)
+        except ValueError:
+            continue
+        if d < cutoff:
+            try:
+                os.remove(os.path.join(cfg["state_dir"], n))
+                gone.append(n)
+            except OSError:
+                pass
+    return gone
+
+
 def event_claim_path(cfg, jid, ds, ehash):
     return os.path.join(cfg["state_dir"], "claim-%s-%s-%s" % (jid, ds, ehash))
 
@@ -1226,7 +1410,7 @@ def start_run(cfg, jid, again=False):
     except ValueError as e:
         raise RunError(409, str(e))
     run_script = os.path.join(ROOT_DIR, "bin", "chronos-run.sh")
-    ds = date_key(job, now())
+    ds = run_now_key(job, now())
     ran = ran_path(cfg, jid, ds)
     if os.path.exists(ran):
         if not again:
@@ -1292,6 +1476,8 @@ def record_content_hash(record, prompt_bytes, guard_bytes):
            "in_session": record.get("in_session") is True, "headless": record.get("headless") is not False}
     if record.get("triggers"):
         sub["triggers"] = record["triggers"]       # a trigger is a way to start the job: a hand-added one must hold it (a job without any hashes as before)
+    if record.get("meta"):
+        sub["meta"] = record["meta"]               # meta can steer what the job does (HB0): an edit holds the job. `times` is left out like `time`: a time edit is low risk
     return sha256_ref(canon(sub) + b"\0" + prompt_bytes + b"\0" + guard_bytes)
 
 
@@ -1351,6 +1537,10 @@ def when_obj(job):
     if job.get("once"):
         return {"type": "once", "at": job["once"]}
     kind, vals = parse_days(job["days"])
+    if is_times(job):
+        parse_times(job["times"])
+        days = kind if kind in ("daily", "weekdays") else ([DAY_NAMES[v] for v in vals] if kind == "days" else vals)
+        return {"type": "times", "days": days, "times": list(job["times"])}
     t = job["time"]
     if kind == "daily":
         return {"type": "daily", "time": t}
@@ -1379,6 +1569,9 @@ def day_state(cfg, job, d, at=None):
     A one-shot's day is the date it was set for."""
     at = at or now()
     jid = job["id"]
+    if is_times(job) and not job.get("once"):
+        sts = [slot_state(cfg, job, d, ds_, f_, at) for ds_, f_ in slots(job, d)]
+        return next((w for w in SLOT_PRECEDENCE if w in sts), "not_due")
     ds = day_str(d)
     if job.get("once"):
         try:
@@ -1410,10 +1603,61 @@ def day_state(cfg, job, d, at=None):
     return "missed"
 
 
+SLOT_PRECEDENCE = ("running", "waiting", "held", "pending", "stalled", "failed", "missed", "ran")
+
+
+def marker_keys(job, d):
+    """The run keys whose markers a job can have for calendar date d: its slot keys, or for a plain job the date."""
+    return [k for k, _f in slots(job, d)] if is_times(job) and not job.get("once") else [day_str(d)]
+
+
+def slot_state(cfg, job, d, ds, f, at):
+    """The state of ONE slot (run key `ds`, fire time `f`, on calendar date `d`) of a job with `times`; same states as day_state."""
+    jid = job["id"]
+    if os.path.exists(ran_path(cfg, jid, ds)):
+        return "ran"
+    if os.path.exists(failed_path(cfg, jid, ds)):
+        return "failed"
+    if os.path.exists(stalled_path(cfg, jid, ds)):
+        return "stalled"
+    if os.path.isdir(claim_path(cfg, jid, ds)):
+        return "running"
+    if job.get("enabled") is not True or not clock_on(job) or d > at.date():
+        return "not_due"
+    if is_held(cfg, job):
+        return "held"
+    if at < f:
+        return "pending"
+    if at < f + datetime.timedelta(minutes=window_minutes(job)):
+        return "waiting"
+    return "missed"
+
+
+def current_slot(cfg, job, at=None):
+    """-> (run key, date, fire datetime, state) of the slot a job with `times` is "at": an open one (running, else waiting) of yesterday or
+    today, otherwise the next one to come, otherwise the latest one that has passed. (None, today, None, "not_due") when it has no slot."""
+    at = at or now()
+    cands = []
+    for back in (1, 0):
+        d = at.date() - datetime.timedelta(days=back)
+        for ds, f in slots(job, d):
+            cands.append((ds, d, f, slot_state(cfg, job, d, ds, f, at)))
+    for want in (("running",), ("waiting",), ("pending", "held")):
+        hit = next((c for c in cands if c[3] in want), None)
+        if hit:
+            return hit
+    if cands:
+        return cands[-1]
+    return (None, at.date(), None, "not_due")
+
+
 def current_day(cfg, job, at=None):
     """-> (date, state): yesterday's fire if its window is still open and unfinished, otherwise today. A 23:50 job with a
     180 minute window is still `waiting` at 00:05, on yesterday's date."""
     at = at or now()
+    if is_times(job) and not job.get("once"):
+        _k, d, _f, st = current_slot(cfg, job, at)
+        return d, st
     y = at.date() - datetime.timedelta(days=1)
     if not job.get("once"):
         ys = day_state(cfg, job, y, at)
@@ -1442,6 +1686,14 @@ def due_for_session(cfg, at=None):
             validate_job_record(j)
             jid = j["id"]
             if is_paused(cfg, jid) or not os.path.isfile(prompt_file(cfg, jid)) or is_held(cfg, j):
+                continue
+            if is_times(j):
+                for d in (at.date() - datetime.timedelta(days=1), at.date()):
+                    for ds, f in slots(j, d):
+                        if slot_state(cfg, j, d, ds, f, at) != "waiting":
+                            continue
+                        end = f + datetime.timedelta(minutes=window_minutes(j))
+                        out.append({"id": jid, "ds": ds, "fire_at": aware_iso(f), "window_ends": aware_iso(end)})
                 continue
             days = [parse_once(j["once"]).date()] if j.get("once") else [at.date() - datetime.timedelta(days=1), at.date()]
             for d in days:

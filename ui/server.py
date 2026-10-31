@@ -181,6 +181,13 @@ def day_status(job, d, today_dt):
     ds = C.day_str(d)
     today = today_dt.date()
     jid = job["id"]
+    if C.is_times(job) and not job.get("once"):
+        # several slots a day: the shared state machine folds them into one dot (running > upcoming > held > stalled > failed > missed > ran)
+        created = parse_created(job)
+        if created and d < created:
+            return "not-due"
+        st = C.day_state(CFG, job, d, today_dt)
+        return {"waiting": "pending", "not_due": "not-due"}.get(st, st)
     if os.path.exists(C.ran_path(CFG, jid, ds)):
         return "ran"
     if not C.clock_on(job) and C.event_ran(CFG, jid, ds):
@@ -231,8 +238,8 @@ def _size(p):
 
 def runs_for(jid, limit=60):
     """Logs and reports belonging to a job, newest first."""
-    log_re = re.compile(r"^%s-(\d{4}-\d{2}-\d{2})-(\d{4})(?:-([a-f0-9]{10}))?\.log$" % re.escape(jid))
-    rep_re = re.compile(r"^%s-(\d{4}-\d{2}-\d{2})(?:-([a-f0-9]{10}))?\.md$" % re.escape(jid))
+    log_re = re.compile(r"^%s-(\d{4}-\d{2}-\d{2}(?:T\d{4})?)-(\d{4})(?:-([a-f0-9]{10}))?\.log$" % re.escape(jid))
+    rep_re = re.compile(r"^%s-(\d{4}-\d{2}-\d{2}(?:T\d{4})?)(?:-([a-f0-9]{10}))?\.md$" % re.escape(jid))
     out = []
     for n in list_files(LOGS_DIR):
         m = log_re.match(n)
@@ -288,6 +295,9 @@ def describe_job(job, detail=False):
     jid = job["id"]
     out = {k: job.get(k) for k in ("id", "name", "description", "time", "days", "catchup_min",
                                    "enabled", "in_session", "once", "created", "updated")}
+    if C.is_times(job):
+        out["times"] = job.get("times")
+        out["time"] = job["times"][0]                          # the form's single time field is the mirror of times[0] even when the record omits `time`
     out["clock"] = C.clock_on(job)
     out["kind"] = "command" if C.is_command(job) else "claude"
     out["command"] = job.get("command") if C.is_command(job) else None
@@ -309,9 +319,11 @@ def describe_job(job, detail=False):
     today = n.date()
     tds = C.day_str(today)
     ev_claims = C.event_claims(CFG, jid, tds)
-    out["running"] = (os.path.isdir(C.claim_path(CFG, jid, tds)) and not os.path.exists(C.ran_path(CFG, jid, tds))) or bool(ev_claims)
+    tkeys = C.marker_keys(job, today) if C.is_times(job) else [tds]            # a job with `times` has one claim per slot
+    live = [k for k in tkeys if os.path.isdir(C.claim_path(CFG, jid, k)) and not os.path.exists(C.ran_path(CFG, jid, k))]
+    out["running"] = bool(live) or bool(ev_claims)
     try:
-        cps = [C.claim_path(CFG, jid, tds)] + [os.path.join(STATE_DIR, c) for c in ev_claims]
+        cps = [C.claim_path(CFG, jid, k) for k in (live if C.is_times(job) else [tds])] + [os.path.join(STATE_DIR, c) for c in ev_claims]
         ages = [int(time.time() - os.path.getmtime(c)) for c in cps if os.path.isdir(c)]
         out["claim_age_s"] = min(ages) if (out["running"] and ages) else None
     except OSError:
@@ -387,7 +399,7 @@ def snapshot_text(jid, text, label):
 
 HIST_RE = re.compile(r"^(\d{8}-\d{6})(-\d+)?-prompt\.md$")
 JSNAP_RE = re.compile(r"^(\d{8}-\d{6})(-\d+)?\.json$")
-SCHEDULE_FIELDS = ("name", "description", "time", "days", "once", "catchup_min", "enabled", "in_session", "notify")
+SCHEDULE_FIELDS = ("name", "description", "time", "times", "days", "once", "catchup_min", "enabled", "in_session", "notify")
 
 
 def ts_pretty(s):
@@ -508,6 +520,14 @@ def update_schedule(jid, body):
             for k in ("time", "days", "once", "catchup_min"):
                 if k in body:
                     merged[k] = body[k]
+            if C.is_times(job) or body.get("times") is not None:
+                # a job with several times keeps them: the form's single `time` is the mirror of times[0], so the same value saves as-is;
+                # a different single time is refused rather than silently dropping the list. Sending `times` replaces the list.
+                merged["times"] = body["times"] if body.get("times") is not None else job.get("times")
+                if body.get("times") is None and "time" in body and body["time"] != (job.get("times") or [None])[0]:
+                    raise ApiError(422, "this job runs at several times; edit the list of times, not the single time")
+                if body.get("times") is not None:
+                    merged["time"] = None
             clean, errors = C.validate_schedule(merged)
             if errors:
                 raise ApiError(422, "; ".join(errors), errors=errors)
@@ -515,6 +535,8 @@ def update_schedule(jid, body):
             clean = {}
         new = dict(job)
         new.update(clean)
+        if clean and "times" not in clean:
+            new.pop("times", None)                         # saved as a plain single time
         for k in ("name", "description"):
             if k in body:
                 v = str(body[k]).strip().replace("\n", " ")
@@ -534,6 +556,8 @@ def update_schedule(jid, body):
             new["notify"] = body["notify"]
         if new.get("once") and CFG["session_runner"] != "talos":
             new["in_session"] = False                  # one-shots may be session jobs only when an external runner (talos) takes them
+        if C.is_times(new) and new.get("in_session") is True and CFG["session_runner"] != "talos":
+            raise ApiError(422, "a job with several times can run in a live session only when session_runner is talos")
         if "in_session" in body:
             if new.get("in_session") is True and CFG["session_runner"] == "talos":
                 new["headless"] = False
@@ -820,12 +844,12 @@ def view_file(kind, name):
 def all_runs(job_filter=None, limit=80):
     rows = []
     for n in list_files(LOGS_DIR):
-        m = re.match(r"^(.+?)-(\d{4}-\d{2}-\d{2})-(\d{4})(?:-([a-f0-9]{10}))?\.log$", n)
+        m = re.match(r"^(.+?)-(\d{4}-\d{2}-\d{2}(?:T\d{4})?)-(\d{4})(?:-([a-f0-9]{10}))?\.log$", n)
         if m:
             rows.append({"kind": "log", "name": n, "job": m.group(1), "date": m.group(2), "event": m.group(4),
                          "time": m.group(3)[:2] + ":" + m.group(3)[2:], "size": _size(os.path.join(LOGS_DIR, n))})
     for n in list_files(REPORTS_DIR):
-        m = re.match(r"^(.+?)-(\d{4}-\d{2}-\d{2})(?:-([a-f0-9]{10}))?\.md$", n)
+        m = re.match(r"^(.+?)-(\d{4}-\d{2}-\d{2}(?:T\d{4})?)(?:-([a-f0-9]{10}))?\.md$", n)
         if m:
             rows.append({"kind": "report", "name": n, "job": m.group(1), "date": m.group(2), "time": "", "event": m.group(3),
                          "size": _size(os.path.join(REPORTS_DIR, n))})
@@ -843,10 +867,16 @@ def preview(q):
     fields = {k: (q.get(k) or [""])[0] for k in ("time", "days", "once", "catchup_min")}
     if not fields["catchup_min"]:
         fields["catchup_min"] = "180"
+    tl = (q.get("times") or [""])[0]
+    if tl:
+        fields["times"] = [t.strip() for t in tl.split(",")]
+        fields["time"] = None
     clean, errors = C.validate_schedule(fields)
     res = {"ok": not errors, "errors": errors, "text": "", "next": []}
     if not errors:
         job = {"time": clean["time"], "days": clean["days"], "once": clean.get("once")}
+        if clean.get("times") is not None:
+            job["times"] = clean["times"]
         res["text"] = C.english(job)
         res["next"] = [iso(x) for x in C.next_fires(job, now(), 3)]
         if clean.get("once") and not res["next"]:
