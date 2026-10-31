@@ -248,6 +248,14 @@ def validate_job_record(j):
     check_restricted_field(j)
     if j.get("times") is not None:
         parse_times(j["times"])
+        try:
+            kind = parse_days(j.get("days") or "daily")[0]
+        except ValueError:
+            kind = None             # a bad days string is reported by the schedule checks that read it
+        if kind == "dom":
+            raise ValueError("times works with daily, weekdays or named days, not days of the month")
+        if kind:
+            check_times_wrap(j["times"], j.get("days") or "daily")
         if j.get("once"):
             raise ValueError("a job with times cannot also be a one-shot")
         if j.get("time") not in (None, "") and j.get("time") != j["times"][0]:
@@ -480,12 +488,24 @@ def parse_times(v):
     return out
 
 
+def check_times_wrap(times, days):
+    """The last time of one day and the first of the next must also be TIMES_MIN_GAP_MIN apart, when the job can run on two days in a row.
+    `times` is the raw list, `days` the days string. Raises ValueError."""
+    mins = [h * 60 + m for h, m in parse_times(times)]
+    if mins[0] + 1440 - mins[-1] >= TIMES_MIN_GAP_MIN:
+        return
+    kind, vals = parse_days(days)
+    if kind == "dow" and not any((v + 1) % 7 in vals for v in vals):
+        return
+    raise ValueError("the last time of a day and the first time of the next day must be at least %d minutes apart" % TIMES_MIN_GAP_MIN)
+
+
 def check_meta(meta):
     """`meta`: an opaque JSON object a client keeps on the job. At most 4 KiB as canonical JSON. Raises ValueError."""
     if not isinstance(meta, dict):
         raise ValueError("meta must be a JSON object")
     try:
-        n = len(canon(meta))
+        n = len(json.dumps(meta, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8"))
     except (TypeError, ValueError):
         raise ValueError("meta must be plain JSON")
     if n > META_MAX_BYTES:
@@ -589,7 +609,14 @@ def slots(job, d):
     if not is_due_day(job, d):
         return []
     if is_times(job):
-        return [("%sT%02d%02d" % (day_str(d), h, m), valid_local(datetime.datetime(d.year, d.month, d.day, h, m))) for h, m in parse_times(job["times"])]
+        out, seen = [], set()
+        for h, m in parse_times(job["times"]):
+            f = valid_local(datetime.datetime(d.year, d.month, d.day, h, m))
+            if f in seen:
+                continue            # a spring-forward gap folds two slots onto one instant: the first keeps it, so they never start together
+            seen.add(f)
+            out.append(("%sT%02d%02d" % (day_str(d), h, m), f))
+        return out
     return [(day_str(d), fire_dt(job, d))]
 
 
@@ -636,6 +663,8 @@ def validate_schedule(fields):
                 clean["days"] = normalize_days(fields.get("days"))
                 if parse_days(clean["days"])[0] == "dom":
                     errors.append("times works with daily, weekdays or named days, not days of the month")
+                elif "times" in clean:
+                    check_times_wrap(clean["times"], clean["days"])
             except ValueError as e:
                 errors.append(str(e))
     elif once:
@@ -711,8 +740,85 @@ def run_now_key(job, at):
     """The key a manual Run now uses. A plain job: its date key. A job with `times`: an ad-hoc key (today and the minute), which is
     not one of its slots, so a manual run never consumes a slot."""
     if is_times(job) and not job.get("once"):
-        return "%sT%02d%02d" % (day_str(at.date()), at.hour, at.minute)
+        t = at.replace(second=0, microsecond=0)
+        for _ in range(60):                  # a manual run in a slot's own minute would BE that slot: step to the next minute that is not one
+            if t.strftime("%Y-%m-%dT%H%M") not in [k for k, _f in slots(job, t.date())]:
+                break
+            t += datetime.timedelta(minutes=1)
+        return t.strftime("%Y-%m-%dT%H%M")
     return date_key(job, at)
+
+
+def live_claims(cfg, jid, at=None):
+    """Run keys of the job's live claims, whatever their shape (a slot, an ad-hoc Run now key, a date). Stale ones are swept first. Sorted."""
+    at = at or now()
+    rx = re.compile(r"^claim-%s-(\d{4}-\d{2}-\d{2}(?:T\d{4})?)\Z" % re.escape(jid))
+    try:
+        names = os.listdir(cfg["state_dir"])
+    except OSError:
+        return []
+    out = []
+    for n in names:
+        m = rx.match(n)
+        if not m:
+            continue
+        cp = os.path.join(cfg["state_dir"], n)
+        if os.path.isdir(cp) and not sweep_stale_claim(cfg, cp, at):
+            out.append(m.group(1))
+    return sorted(out)
+
+
+def other_run_live(cfg, job, ds, at=None):
+    """True when a job with `times` has a live claim under a key other than `ds`: one run of a job at a time."""
+    return is_times(job) and not job.get("once") and any(k != ds for k in live_claims(cfg, job["id"], at))
+
+
+def clear_stalled_slots(cfg, job, at=None):
+    """A successful Run now clears the job's stalled slot markers of yesterday and today (what Run now does for a plain job's date key),
+    so launch_stalled stops reporting a job that has just run. A slot's failed marker is run history and stays."""
+    if not (is_times(job) and not job.get("once")):
+        return
+    at = at or now()
+    for back in (1, 0):
+        for k, _f in slots(job, at.date() - datetime.timedelta(days=back)):
+            try:
+                os.remove(stalled_path(cfg, job["id"], k))
+            except OSError:
+                pass
+
+
+def newer_slot_started(job, ds, at):
+    """True when a later slot of this job than `ds` has already reached its fire time. An older slot that is still open then is
+    SUPERSEDED: the newest slot covers it, so a laptop that wakes after several slots runs one, not all of them at once."""
+    try:
+        d = datetime.date.fromisoformat(ds[:10])
+    except ValueError:
+        return False
+    while d <= at.date():
+        for k, f in slots(job, d):
+            if k > ds and f <= at:
+                return True
+        d += datetime.timedelta(days=1)
+    return False
+
+
+def prior_form_done(cfg, job, ds):
+    """Switching a job between `time` and `times` must not run it twice the same day: the first slot of a `times` job counts as done when the
+    plain date key ran, and a plain job counts as done when the slot of its own time ran."""
+    try:
+        jid = job["id"]
+        if job.get("once"):
+            return False
+        if is_times(job):
+            d = datetime.date.fromisoformat(ds[:10])
+            sl = slots(job, d)
+            return len(ds) > 10 and bool(sl) and sl[0][0] == ds and os.path.exists(ran_path(cfg, jid, day_str(d)))
+        if len(ds) == 10:
+            hh, mm = parse_time(job["time"])
+            return os.path.exists(ran_path(cfg, jid, "%sT%02d%02d" % (ds, hh, mm)))
+    except (ValueError, KeyError, TypeError):
+        pass
+    return False
 
 
 def ran_path(cfg, jid, ds):
@@ -840,17 +946,25 @@ def due_jobs(cfg, at=None):
             for f, grace, ds in due_slots:
                 if not (f + datetime.timedelta(minutes=grace) <= at < f + datetime.timedelta(minutes=win)):
                     continue
-                if _due_ds(cfg, j, jid, ds):
+                if _due_ds(cfg, j, jid, ds, at):
                     out.append((jid, ds))
         except Exception as e:
             sys.stderr.write("skip job %r: %s\n" % (j.get("id") if isinstance(j, dict) else j, e))
     return out
 
 
-def _due_ds(cfg, j, jid, ds):
+def _due_ds(cfg, j, jid, ds, at=None):
     """The per-(job, ds) gates of due_jobs."""
     if is_paused(cfg, jid) or os.path.exists(ran_path(cfg, jid, ds)) or os.path.exists(failed_path(cfg, jid, ds)):
         return False
+    if prior_form_done(cfg, j, ds):
+        return False
+    if is_times(j) and not j.get("once"):
+        at = at or now()
+        if newer_slot_started(j, ds, at):
+            return False            # superseded: a later slot has started, and it covers this one
+        if other_run_live(cfg, j, ds, at):
+            return False            # one run of a job at a time: this slot waits (inside its window) for the live one
     if os.path.exists(stalled_path(cfg, jid, ds)):
         return False            # N5: a stalled (id, ds) is terminal for the tick, block or no block. Only Run now clears it.
     if os.path.exists(cfg["blocked_file"]) and not is_command(j):
@@ -889,22 +1003,28 @@ def claim(cfg, jid, unattended=False, at=None, ds=None):
         return "NOT_DUE"
     if is_held(cfg, job):
         return "HELD"
-    if is_times(job):
-        # a slot key is never rewritten into a date key: a key that is not a well-formed run key is refused, not replaced by "today"
+    if is_times(job) and not job.get("once"):
+        # a slot key is never rewritten into a date key: a key that is not one of the job's slots (yesterday's or today's) is refused, not replaced by "today"
         if ds is not None and ds != "" and not (isinstance(ds, str) and SLOT_RE.match(ds)):
             return "NOT_DUE"
-        if unattended and ds and ds not in [k for back in (1, 0) for k, _f in slots(job, at.date() - datetime.timedelta(days=back))]:
+        if ds and ds not in [k for back in (1, 0) for k, _f in slots(job, at.date() - datetime.timedelta(days=back))]:
             return "NOT_DUE"
         ds = ds or date_key(job, at)
+        if newer_slot_started(job, ds, at):
+            return "NOT_DUE"            # superseded by a later slot
     else:
+        if ds and re.match(r"^\d{4}-\d{2}-\d{2}T\d{4}\Z", str(ds)):
+            return "NOT_DUE"            # a slot key for a job that has no slots (edited to a plain time since `due` printed it): never the date key's claim
         ds = ds if (ds and re.match(r"^\d{4}-\d{2}-\d{2}$", ds)) else date_key(job, at)     # the tick passes the ds `due` printed (yesterday's, after midnight)
     os.makedirs(cfg["state_dir"], exist_ok=True)
     cp = claim_path(cfg, jid, ds)
     sweep_stale_claim(cfg, cp, at)
-    if os.path.exists(ran_path(cfg, jid, ds)):
+    if os.path.exists(ran_path(cfg, jid, ds)) or prior_form_done(cfg, job, ds):
         return "ALREADY_DONE"
     if os.path.exists(failed_path(cfg, jid, ds)) or os.path.exists(stalled_path(cfg, jid, ds)):
         return "FAILED_TODAY"            # a failed or stalled day is terminal for the tick; only Run now (which clears the marker first) takes it
+    if other_run_live(cfg, job, ds, at):
+        return "RUNNING_ELSEWHERE"      # one run of a job at a time, whichever slot (or Run now) holds it
     try:
         os.mkdir(cp)
     except FileExistsError:
@@ -919,7 +1039,8 @@ def _default_ds(cfg, jid):
     except Exception:
         job = None
     if is_times(job):
-        return date_key(job, now())
+        live = live_claims(cfg, jid)
+        return live[-1] if live else date_key(job, now())       # the run that is going, else the latest slot that has started
     return day_str(now().date())
 
 
@@ -943,7 +1064,7 @@ def mark_done(cfg, jid, ds=None):
 
 
 # --------------------------------------------------------------------------- event runs (triggers)
-PRUNE_DAYS = 8
+PRUNE_DAYS = 15              # longer than the UI's 14-day strip (ui/server.py STRIP_DAYS), so a ran slot never turns into a red "missed" day
 _SLOT_MARKER_RE = re.compile(r"^(ran|failed|stalled|waitnotified|run)-([a-z0-9-]{2,40}?)-(\d{4}-\d{2}-\d{2})(T\d{4})?(\.json)?\Z")
 
 
@@ -1425,10 +1546,13 @@ def start_run(cfg, jid, again=False):
     os.makedirs(cfg["logs_dir"], exist_ok=True)
     cp = claim_path(cfg, jid, ds)
     sweep_stale_claim(cfg, cp)
+    if other_run_live(cfg, job, ds):
+        raise RunError(409, "This job is already running (claim held).", running=True)
     try:
         os.mkdir(cp)
     except FileExistsError:
         raise RunError(409, "This job is already running (claim held).", running=True)
+    clear_stalled_slots(cfg, job)
     try:
         logf = open(os.path.join(cfg["logs_dir"], "chronos.log"), "a")
         logf.write("%s CLAIMED %s -> spawning run (manual)\n" % (time.strftime("%F %T"), jid))
@@ -1608,13 +1732,16 @@ SLOT_PRECEDENCE = ("running", "waiting", "held", "pending", "stalled", "failed",
 
 def marker_keys(job, d):
     """The run keys whose markers a job can have for calendar date d: its slot keys, or for a plain job the date."""
-    return [k for k, _f in slots(job, d)] if is_times(job) and not job.get("once") else [day_str(d)]
+    try:
+        return [k for k, _f in slots(job, d)] if is_times(job) and not job.get("once") else [day_str(d)]
+    except (ValueError, KeyError, TypeError):
+        return []            # a hand-edited bad `times` has no keys; it must not take health or the job list down with it
 
 
 def slot_state(cfg, job, d, ds, f, at):
     """The state of ONE slot (run key `ds`, fire time `f`, on calendar date `d`) of a job with `times`; same states as day_state."""
     jid = job["id"]
-    if os.path.exists(ran_path(cfg, jid, ds)):
+    if os.path.exists(ran_path(cfg, jid, ds)) or prior_form_done(cfg, job, ds):
         return "ran"
     if os.path.exists(failed_path(cfg, jid, ds)):
         return "failed"
@@ -1624,13 +1751,17 @@ def slot_state(cfg, job, d, ds, f, at):
         return "running"
     if job.get("enabled") is not True or not clock_on(job) or d > at.date():
         return "not_due"
-    if is_held(cfg, job):
-        return "held"
     if at < f:
-        return "pending"
-    if at < f + datetime.timedelta(minutes=window_minutes(job)):
-        return "waiting"
-    return "missed"
+        st = "pending"
+    elif at < f + datetime.timedelta(minutes=window_minutes(job)):
+        st = "waiting"
+        if newer_slot_started(job, ds, at):
+            st = "missed"            # superseded by a later slot that has started
+    else:
+        st = "missed"
+    if st in ("pending", "waiting") and is_held(cfg, job):
+        return "held"                # only a slot that could still run is held; a past one is just missed, not "held" on yesterday's key
+    return st
 
 
 def current_slot(cfg, job, at=None):
@@ -1646,8 +1777,18 @@ def current_slot(cfg, job, at=None):
         hit = next((c for c in cands if c[3] in want), None)
         if hit:
             return hit
-    if cands:
-        return cands[-1]
+        if want == ("running",):
+            # a Run now holds an ad-hoc key that is no slot: the job is running all the same
+            slot_keys = set(c[0] for c in cands)
+            adhoc = [k for k in live_claims(cfg, job["id"], at) if k not in slot_keys and len(k) > 10]
+            if adhoc:
+                try:
+                    return (adhoc[-1], datetime.date.fromisoformat(adhoc[-1][:10]), datetime.datetime.strptime(adhoc[-1], "%Y-%m-%dT%H%M"), "running")
+                except ValueError:
+                    pass
+    today = [c for c in cands if c[1] == at.date()]
+    if today:
+        return today[-1]             # every slot of today is over: the latest one (a day with no slots, and nothing open, is not_due, not yesterday's last result)
     return (None, at.date(), None, "not_due")
 
 
@@ -1688,6 +1829,8 @@ def due_for_session(cfg, at=None):
             if is_paused(cfg, jid) or not os.path.isfile(prompt_file(cfg, jid)) or is_held(cfg, j):
                 continue
             if is_times(j):
+                if any(True for _k in live_claims(cfg, jid, at)):
+                    continue            # one run of a job at a time: a live run of any slot means nothing more is offered
                 for d in (at.date() - datetime.timedelta(days=1), at.date()):
                     for ds, f in slots(j, d):
                         if slot_state(cfg, j, d, ds, f, at) != "waiting":

@@ -157,7 +157,7 @@ def describe(cfg, job, at, beat_age, rows=None):
         "etag": etag, "content_hash": chash, "state_rev": state_rev,
     }
     if job.get("meta") is not None:
-        out["meta"] = job["meta"]
+        out["meta"] = C.check_meta(job["meta"])       # a hand-edited NaN would make the whole snapshot invalid JSON: that job gets an error row instead
     return out
 
 

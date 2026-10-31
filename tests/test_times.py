@@ -20,9 +20,11 @@ RID = ["r_" + "0" * 25 + str(i) for i in range(1, 9)]
 
 
 def hb(**kw):
-    """A session job with four slots and a window long enough that all four are open at once."""
+    """A session job with four slots and a window long enough that every slot stays open all day (only the newest one runs; older ones are superseded)."""
     j = job("hb", time="09:45", times=list(SLOTS), days="weekdays", catchup_min=1440, in_session=True, headless=False)
     j.update(kw)
+    if "times" in kw and "time" not in kw:
+        j["time"] = kw["times"][0]
     return j
 
 
@@ -46,8 +48,8 @@ class Base(unittest.TestCase):
     def p(self, *parts):
         return os.path.join(self.st, *parts)
 
-    def claim(self, rid, ds, now, jid="hb", expect=0, **kw):
-        return api(self.e, ["claim", jid], claim_req(rid, ds, **kw), now=now, expect=expect)[0]
+    def claim(self, rid, ds, now, jid="hb", expect=0, tz=NY, **kw):
+        return api(self.e, ["claim", jid], claim_req(rid, ds, **kw), now=now, expect=expect, tz=tz)[0]
 
     def finish(self, rid, now, status="ok", report="done\n", jid="hb"):
         return api(self.e, ["finish", jid], {"run_id": rid, "status": status, "report": report}, now=now)[0]
@@ -56,17 +58,18 @@ class Base(unittest.TestCase):
         return self.e.run([sys.executable, CLI] + list(args), **env)
 
 
+NOWS = [MON + "T09:50", MON + "T12:20", MON + "T14:50", MON + "T17:20"]       # just after each slot starts
+
+
 class SlotsAreIndependent(Base):
     NOW = MON + "T17:20"
 
     def test_four_slots_claim_finish_and_report_independently_in_one_day(self):
         for i, k in enumerate(K):
-            self.assertEqual(self.claim(RID[i], k, self.NOW), {"ok": True, "run_id": RID[i], "ds": k})
-        for i, k in enumerate(K):
+            self.assertEqual(self.claim(RID[i], k, NOWS[i]), {"ok": True, "run_id": RID[i], "ds": k})
             self.assertTrue(os.path.isdir(self.p("claim-hb-" + k)))
-        self.assertFalse(os.path.exists(self.p("claim-hb-" + MON)))                  # never the date key
-        for i, k in enumerate(K):
-            self.assertEqual(self.finish(RID[i], self.NOW, report="report %d\n" % i), {"ok": True})
+            self.assertFalse(os.path.exists(self.p("claim-hb-" + MON)))                  # never the date key
+            self.assertEqual(self.finish(RID[i], NOWS[i], report="report %d\n" % i), {"ok": True})
         for i, k in enumerate(K):
             self.assertTrue(os.path.exists(self.p("ran-hb-" + k)), k)
             self.assertEqual(open(self.p("reports", "hb-%s.md" % k)).read(), "report %d\n" % i)
@@ -76,19 +79,23 @@ class SlotsAreIndependent(Base):
         rep, _ = api(self.e, ["report", "hb", "--date", K[1]], now=self.NOW)
         self.assertEqual((rep["date_key"], rep["report"]), (K[1], "report 1\n"))
 
-    def test_a_second_claim_on_one_slot_is_running_elsewhere_and_other_slots_are_free(self):
-        self.claim(RID[0], K[0], self.NOW)
-        self.assertEqual(self.claim(RID[1], K[0], self.NOW)["reason"], "running_elsewhere")
-        self.assertTrue(self.claim(RID[1], K[1], self.NOW)["ok"])
+    def test_a_second_claim_on_one_slot_is_running_elsewhere_and_a_job_runs_one_slot_at_a_time(self):
+        self.e.set_jobs([hb(times=["09:45", "10:00"])])
+        k0, k1 = MON + "T0945", MON + "T1000"
+        self.claim(RID[0], k0, MON + "T09:50")
+        self.assertEqual(self.claim(RID[1], k0, MON + "T09:50")["reason"], "running_elsewhere")
+        self.assertEqual(self.claim(RID[1], k1, MON + "T10:05")["reason"], "running_elsewhere")      # slot 2 starts while slot 1 still runs: it waits
+        self.finish(RID[0], MON + "T10:06")
+        self.assertTrue(self.claim(RID[1], k1, MON + "T10:07")["ok"])
 
     def test_a_failed_marker_on_slot_2_does_not_block_slot_3(self):
-        self.assertTrue(self.claim(RID[1], K[1], self.NOW)["ok"])
-        self.finish(RID[1], self.NOW, status="failed", report="boom\n")
+        self.assertTrue(self.claim(RID[1], K[1], NOWS[1])["ok"])
+        self.finish(RID[1], NOWS[1], status="failed", report="boom\n")
         self.assertTrue(os.path.exists(self.p("failed-hb-" + K[1])))
-        self.assertEqual(self.claim(RID[4], K[1], self.NOW)["reason"], "failed_today")
-        self.assertEqual(self.claim(RID[2], K[2], self.NOW), {"ok": True, "run_id": RID[2], "ds": K[2]})
-        due = [d["ds"] for d in api(self.e, ["due", "--for", "session"], now=self.NOW)[0]["due"]]
-        self.assertEqual(due, [K[0], K[3]])                                          # 2 failed, 3 claimed; 1 and 4 still offered
+        self.assertEqual(self.claim(RID[4], K[1], NOWS[1])["reason"], "failed_today")
+        due = [d["ds"] for d in api(self.e, ["due", "--for", "session"], now=NOWS[2])[0]["due"]]
+        self.assertEqual(due, [K[2]])                                                # the newest open slot only
+        self.assertEqual(self.claim(RID[2], K[2], NOWS[2]), {"ok": True, "run_id": RID[2], "ds": K[2]})
 
     def test_an_unknown_slot_is_not_due_unless_the_run_is_manual(self):
         self.assertEqual(self.claim(RID[0], MON + "T1000", self.NOW)["reason"], "not_due")
@@ -103,11 +110,11 @@ class SlotsAreIndependent(Base):
 
     def test_last_run_is_the_latest_slot(self):
         for i in (0, 1):
-            self.claim(RID[i], K[i], self.NOW)
-            self.finish(RID[i], self.NOW)
-        s = sched(self.e, "hb", now=self.NOW)
+            self.claim(RID[i], K[i], NOWS[i])
+            self.finish(RID[i], NOWS[i])
+        s = sched(self.e, "hb", now=NOWS[1])
         self.assertEqual(s["last_run"]["ds"], K[1])
-        d, _ = api(self.e, ["detail", "hb"], now=self.NOW)
+        d, _ = api(self.e, ["detail", "hb"], now=NOWS[1])
         self.assertEqual([r["ds"] for r in d["runs"]], [K[1], K[0]])
 
 
@@ -151,16 +158,18 @@ class CliClaim(Base):
         r = self.cli("claim", "hb", MON + "T1300", "--unattended", CHRONOS_NOW=MON + "T13:05")
         self.assertEqual(r.stdout.strip(), "NOT_DUE")
 
-    def test_due_lists_each_open_slot_and_a_ran_slot_drops_out(self):
+    def test_due_lists_only_the_newest_open_slot_and_a_ran_slot_drops_out(self):
         r, lines = self.e.due(MON + "T12:30")
-        self.assertEqual(lines, ["hb|" + K[0], "hb|" + K[1]], r.stderr)
-        self.e.touch(self.st, "ran-hb-" + K[0])
+        self.assertEqual(lines, ["hb|" + K[1]], r.stderr)                          # slot 1 is open too (window 1440) but superseded
+        self.e.touch(self.st, "ran-hb-" + K[1])
         r, lines = self.e.due(MON + "T12:30")
-        self.assertEqual(lines, ["hb|" + K[1]])
+        self.assertEqual(lines, [])                                                  # the older slot does not come back when the newer one is done
 
     def test_the_grace_period_applies_to_each_slot(self):
-        r, lines = self.e.due(MON + "T12:20")                      # 5 minutes after 12:15, grace is 10
-        self.assertEqual(lines, ["hb|" + K[0]])
+        r, lines = self.e.due(MON + "T12:20")                      # 5 minutes after 12:15, grace is 10: slot 2 not yet, slot 1 is superseded
+        self.assertEqual(lines, [])
+        r, lines = self.e.due(MON + "T12:26")
+        self.assertEqual(lines, ["hb|" + K[1]])
 
     def test_a_weekend_has_no_slots(self):
         r, lines = self.e.due("2026-10-11T12:30")          # a Sunday; Friday's windows are over
@@ -375,22 +384,22 @@ class WaitNotifyAndMissed(Base):
 class Prune(Base):
     jobs = [hb(in_session=False, headless=True)]
 
-    def test_slot_markers_older_than_8_days_are_pruned_and_nothing_else(self):
+    def test_slot_markers_older_than_15_days_are_pruned_and_nothing_else(self):
         keep = ["ran-hb-2026-10-05T0945", "ran-hb-2026-10-05", "ran-other-2026-09-01", "claim-hb-2026-09-20T0945", "approved", "headless.blocked"]
         gone = ["ran-hb-2026-09-25T0945", "failed-hb-2026-09-25T1215", "stalled-hb-2026-09-25T1445", "waitnotified-hb-2026-09-25T1715"]
         os.makedirs(self.st, exist_ok=True)
         for n in keep + gone:
             self.e.touch(self.st, n)
-        r = self.cli("prune", CHRONOS_NOW="2026-10-06T09:00")
+        r = self.cli("prune", CHRONOS_NOW="2026-10-12T09:00")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(sorted(n for n in gone if os.path.exists(self.p(n))), [])
         self.assertEqual(sorted(n for n in keep if not os.path.exists(self.p(n))), [])
 
-    def test_the_8_day_edge(self):
+    def test_the_prune_edge(self):
         os.makedirs(self.st, exist_ok=True)
         for n in ("ran-hb-2026-10-01T0945", "ran-hb-2026-09-30T0945"):
             self.e.touch(self.st, n)
-        self.cli("prune", CHRONOS_NOW="2026-10-09T09:00")                        # 8 days after 10-01 is 10-09: kept; 10-08 and older go
+        self.cli("prune", CHRONOS_NOW="2026-10-16T09:00")                        # 15 days after 10-01 is 10-16: kept; 09-30 and older go
         self.assertTrue(os.path.exists(self.p("ran-hb-2026-10-01T0945")))
         self.assertFalse(os.path.exists(self.p("ran-hb-2026-09-30T0945")))
 
@@ -408,10 +417,9 @@ class RunScript(Base):
     def test_a_headless_slot_runs_with_its_own_markers_log_and_report(self):
         r = self.e.run(["/bin/bash", TICK], CHRONOS_NOW=MON + "T12:30", FAKE_MODE="ok")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.e.wait_for(lambda: os.path.exists(self.p("ran-hb-" + K[0])) and os.path.exists(self.p("ran-hb-" + K[1])))
-        for k in K[:2]:
-            self.assertTrue(os.path.exists(self.p("ran-hb-" + k)), k)
-            self.assertTrue(os.path.exists(self.p("reports", "hb-%s.md" % k)), k)
+        self.e.wait_for(lambda: os.path.exists(self.p("ran-hb-" + K[1])))
+        self.assertTrue(os.path.exists(self.p("reports", "hb-%s.md" % K[1])))
+        self.assertFalse(os.path.exists(self.p("ran-hb-" + K[0])))                    # the older open slot was superseded, not run
         self.assertFalse(os.path.exists(self.p("ran-hb-" + K[2])))
         self.assertFalse(os.path.exists(self.p("ran-hb-" + MON)))
         self.assertEqual(json.load(open(self.e.cfg["jobs_file"]))[0]["id"], "hb")
@@ -487,8 +495,10 @@ class PlainTimeIsByteIdentical(Base):
 
     def test_a_slot_shaped_ds_is_not_a_date_for_a_plain_job(self):
         self.e.set_jobs([job("morning", time="07:30", days="weekdays")])
-        self.assertEqual(self.cli("claim", "morning", MON + "T0730", CHRONOS_NOW=MON + "T07:45").stdout.strip(), "CLAIMED")
-        self.assertTrue(os.path.isdir(self.p("claim-morning-" + MON)))            # old behaviour: an unrecognised ds falls back to today's date key
+        self.assertEqual(self.cli("claim", "morning", MON + "T0730", CHRONOS_NOW=MON + "T07:45").stdout.strip(), "NOT_DUE")
+        self.assertFalse(os.path.exists(self.p("claim-morning-" + MON)))          # never the date key's claim under a slot key (the job was edited since `due` printed it)
+        self.assertEqual(self.cli("claim", "morning", "garbage", CHRONOS_NOW=MON + "T07:45").stdout.strip(), "CLAIMED")      # an unrecognised ds still falls back, as before
+        self.assertTrue(os.path.isdir(self.p("claim-morning-" + MON)))
 
     def test_the_session_claim_of_a_plain_job_rejects_a_slot_key(self):
         out, r = api(self.e, ["claim", "morning"], claim_req(RID[0], MON + "T0730"), now=MON + "T07:45", expect=1)
@@ -504,6 +514,308 @@ class PlainTimeIsByteIdentical(Base):
             self.assertEqual(rec["time"], "08:00")
         finally:
             ui.stop()
+
+
+NY = "America/New_York"
+
+
+def hl(**kw):
+    """A headless job with the given slots."""
+    j = hb(in_session=False, headless=True)
+    j.update(kw)
+    if "times" in kw and "time" not in kw:
+        j["time"] = kw["times"][0]
+    return j
+
+
+class CatchUpRunsOnlyTheNewestSlot(Base):
+    jobs = [hl(times=["09:00", "09:15", "09:30", "09:45", "10:00", "10:15", "10:30"], catchup_min=180)]
+
+    def test_a_mac_that_wakes_late_runs_one_slot_not_seven(self):
+        r, lines = self.e.due(MON + "T11:00")
+        self.assertEqual(lines, ["hb|" + MON + "T1030"], r.stderr)
+
+    def test_an_older_open_slot_cannot_be_claimed(self):
+        self.assertEqual(self.cli("claim", "hb", MON + "T0900", CHRONOS_NOW=MON + "T11:00").stdout.strip(), "NOT_DUE")
+        self.assertEqual(self.cli("claim", "hb", MON + "T1030", CHRONOS_NOW=MON + "T11:00").stdout.strip(), "CLAIMED")
+
+    def test_the_tick_starts_one_run(self):
+        self.e.run(["/bin/bash", TICK], CHRONOS_NOW=MON + "T11:00", FAKE_MODE="ok")
+        self.e.wait_for(lambda: os.path.exists(self.p("ran-hb-" + MON + "T1030")))
+        self.assertEqual([n for n in os.listdir(self.st) if n.startswith("ran-hb-")], ["ran-hb-" + MON + "T1030"])
+
+    def test_the_session_offer_and_the_api_claim_agree(self):
+        self.e.set_jobs([hb(times=["09:00", "09:15", "09:30"], catchup_min=180)])
+        out, _ = api(self.e, ["due", "--for", "session"], now=MON + "T10:00")
+        self.assertEqual([d["ds"] for d in out["due"]], [MON + "T0930"])
+        self.assertEqual(self.claim(RID[0], MON + "T0900", MON + "T10:00")["reason"], "window_passed")
+        self.assertEqual(sched(self.e, "hb", now=MON + "T10:00")["ds"], MON + "T0930")
+
+    def test_the_slot_that_was_skipped_reads_as_missed_not_waiting(self):
+        sys.path.insert(0, os.path.join(ROOT, "lib"))
+        j = self.e.cfg and C.load_jobs(self.e.cfg)[0]
+        at = C.datetime.datetime(2026, 10, 5, 11, 0)
+        d = at.date()
+        self.assertEqual(C.slot_state(self.e.cfg, j, d, MON + "T0900", C.slots(j, d)[0][1], at), "missed")
+        self.assertEqual(C.slot_state(self.e.cfg, j, d, MON + "T1030", C.slots(j, d)[-1][1], at), "waiting")
+
+
+class OneRunOfAJobAtATime(Base):
+    jobs = [hl(times=["09:45", "10:00"], catchup_min=30)]
+
+    def test_a_slow_run_holds_back_the_next_slot(self):
+        self.assertEqual(self.cli("claim", "hb", MON + "T0945", CHRONOS_NOW=MON + "T09:56").stdout.strip(), "CLAIMED")
+        self.assertEqual(self.cli("claim", "hb", MON + "T1000", CHRONOS_NOW=MON + "T10:10").stdout.strip(), "RUNNING_ELSEWHERE")
+        r, lines = self.e.due(MON + "T10:10")
+        self.assertEqual(lines, [])
+        self.cli("done", "hb", MON + "T0945", CHRONOS_NOW=MON + "T10:12")
+        r, lines = self.e.due(MON + "T10:12")
+        self.assertEqual(lines, ["hb|" + MON + "T1000"])
+
+    def test_done_with_no_key_closes_the_slot_that_is_running(self):
+        self.cli("claim", "hb", MON + "T0945", CHRONOS_NOW=MON + "T09:56")
+        r = self.cli("done", "hb", CHRONOS_NOW=MON + "T10:05")           # slot 2 has started, slot 1 is the one running
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(os.path.exists(self.p("ran-hb-" + MON + "T0945")))
+        self.assertFalse(os.path.exists(self.p("ran-hb-" + MON + "T1000")))
+        self.assertFalse(os.path.exists(self.p("claim-hb-" + MON + "T0945")))
+
+
+class RunNowIsNeverASlot(Base):
+    jobs = [hl(times=["09:45", "12:15"], catchup_min=60)]
+
+    def test_run_now_in_a_slots_own_minute_gets_another_key(self):
+        sys.path.insert(0, os.path.join(ROOT, "lib"))
+        j = C.load_jobs(self.e.cfg)[0]
+        for hh, mm, want in ((9, 45, "T0946"), (12, 15, "T1216"), (10, 30, "T1030")):
+            self.assertEqual(C.run_now_key(j, C.datetime.datetime(2026, 10, 5, hh, mm, 30)), MON + want)
+
+    def test_a_manual_claim_at_09_45_leaves_the_slot_to_run(self):
+        out = self.claim(RID[0], None, MON + "T09:45", manual=True)
+        self.assertEqual(out["ds"], MON + "T0946")
+        self.finish(RID[0], MON + "T09:50")
+        self.assertFalse(os.path.exists(self.p("ran-hb-" + MON + "T0945")))
+        r, lines = self.e.due(MON + "T09:56")
+        self.assertEqual(lines, ["hb|" + MON + "T0945"])
+
+
+class ARunNowIsVisibleAndExclusive(Base):
+    jobs = [hl(times=["09:45", "12:15"], catchup_min=60)]
+
+    def test_snapshot_shows_running_and_a_second_run_now_is_refused(self):
+        self.assertTrue(self.claim(RID[0], None, MON + "T10:30", manual=True)["ok"])
+        s = sched(self.e, "hb", now=MON + "T10:31")
+        self.assertEqual((s["today"], s["ds"]), ("running", MON + "T1030"))
+        self.assertEqual(self.claim(RID[1], None, MON + "T10:31", manual=True)["reason"], "running_elsewhere")
+
+    def test_a_slot_waits_while_a_run_now_is_going(self):
+        self.claim(RID[0], None, MON + "T12:10", manual=True)
+        self.assertEqual(self.claim(RID[1], MON + "T1215", MON + "T12:20")["reason"], "running_elsewhere")
+        r, lines = self.e.due(MON + "T12:26", TZ=NY)
+        self.assertEqual(lines, [])
+
+    def test_run_now_is_refused_while_a_slot_is_running(self):
+        self.assertTrue(self.claim(RID[0], MON + "T0945", MON + "T09:56")["ok"])
+        self.assertEqual(self.claim(RID[1], None, MON + "T10:00", manual=True)["reason"], "running_elsewhere")
+
+    def test_the_ui_listing_says_running(self):
+        import datetime as _dt
+        self.claim(RID[0], None, _dt.datetime.now().strftime("%Y-%m-%dT%H:%M"), manual=True, tz=None)       # the UI reads the real clock
+        ui = UIServer(self.e)
+        try:
+            st, jobs = ui.req("GET", "/api/jobs")
+            self.assertEqual(st, 200)
+            self.assertTrue(next(x for x in jobs["jobs"] if x["id"] == "hb")["running"])
+        finally:
+            ui.stop()
+
+
+class RunNowClearsAStalledSlot(Base):
+    jobs = [hl(times=["09:45", "12:15"], catchup_min=60)]
+
+    def test_a_successful_manual_start_clears_launch_stalled(self):
+        self.e.touch(self.st, "stalled-hb-" + MON + "T0945")
+        codes = lambda now: [i["code"] for i in api(self.e, ["health"], now=now)[0]["issues"] if i["schedule_id"] == "hb"]
+        self.assertIn("launch_stalled", codes(MON + "T10:20"))
+        self.claim(RID[0], None, MON + "T10:30", manual=True)
+        self.assertFalse(os.path.exists(self.p("stalled-hb-" + MON + "T0945")))
+        self.assertNotIn("launch_stalled", codes(MON + "T10:40"))
+
+
+class OneBadRecordDoesNotTakeTheListDown(Base):
+    def test_health_and_the_ui_list_survive_each_kind_of_bad_times(self):
+        for bad in (["09:45", "09:50"], [], "09:45", ["9am"]):
+            self.e.set_jobs([hl(id="good", times=["09:45", "12:15"]), hl(id="bad", times=bad, time="09:45")])
+            out, r = api(self.e, ["health"], now=MON + "T10:00")
+            self.assertEqual(r.returncode, 0)
+            ui = UIServer(self.e)
+            try:
+                st, jobs = ui.req("GET", "/api/jobs")
+                self.assertEqual(st, 200, bad)
+                ids = [x["id"] for x in jobs["jobs"]]
+                self.assertEqual(sorted(ids), ["bad", "good"])
+                self.assertTrue(next(x for x in jobs["jobs"] if x["id"] == "good").get("schedule_ok"))
+            finally:
+                ui.stop()
+
+
+class SwitchingBetweenTimeAndTimes(Base):
+    jobs = [job("cv", time="09:45", days="daily", catchup_min=180)]
+
+    def test_adding_times_after_the_plain_run_does_not_run_the_first_slot_again(self):
+        self.e.touch(self.st, "ran-cv-" + MON)
+        self.e.set_jobs([job("cv", time="09:45", times=["09:45", "14:00"], days="daily", catchup_min=180)])
+        r, lines = self.e.due(MON + "T10:00")
+        self.assertEqual(lines, [])
+        self.assertEqual(self.cli("claim", "cv", MON + "T0945", CHRONOS_NOW=MON + "T10:00").stdout.strip(), "ALREADY_DONE")
+        r, lines = self.e.due(MON + "T14:11")
+        self.assertEqual(lines, ["cv|" + MON + "T1400"])
+
+    def test_going_back_to_plain_after_a_slot_ran_does_not_run_the_day_again(self):
+        self.e.touch(self.st, "ran-cv-" + MON + "T0945")
+        r, lines = self.e.due(MON + "T10:00")
+        self.assertEqual(lines, [])
+        self.assertEqual(self.cli("claim", "cv", CHRONOS_NOW=MON + "T10:00").stdout.strip(), "ALREADY_DONE")
+
+    def test_a_plain_job_with_no_slot_marker_still_runs(self):
+        r, lines = self.e.due(MON + "T10:00")
+        self.assertEqual(lines, ["cv|" + MON])
+
+
+class SpringForwardGap(Base):
+    jobs = [hl(times=["01:45", "02:15", "02:45", "03:00"], days="daily", catchup_min=120)]
+
+    def test_slots_folded_onto_one_instant_start_once(self):
+        r, lines = self.e.due("2026-03-08T03:11", TZ=NY)
+        self.assertEqual(lines, ["hb|2026-03-08T0215"], r.stderr)
+
+
+class HeldAndWeekendKeys(Base):
+    cfg = {"session_runner": "talos", "approval_required": True}
+    jobs = [hb(in_session=False, headless=True, times=["09:45", "12:15"], catchup_min=180)]
+
+    def test_a_held_job_reports_today_not_yesterdays_slot(self):
+        s = sched(self.e, "hb", now="2026-10-06T08:00")
+        self.assertEqual((s["today"], s["ds"]), ("held", "2026-10-06T0945"))
+
+    def test_a_weekend_is_not_due_and_not_fridays_result(self):
+        self.e.touch(self.st, "ran-hb-2026-10-09T0945")
+        self.e.touch(self.st, "ran-hb-2026-10-09T1215")
+        c = json.load(open(self.e.cfg_path))
+        c["approval_required"] = False
+        json.dump(c, open(self.e.cfg_path, "w"))
+        s = sched(self.e, "hb", now="2026-10-10T20:00")
+        self.assertEqual((s["today"], s["ds"]), ("not_due", "2026-10-10"))
+
+
+class CliClaimRefusesNonSlots(Base):
+    jobs = [hl()]
+
+    def test_a_key_that_is_not_a_slot_is_not_due_without_unattended(self):
+        for k in (MON + "T0946", MON, MON + "T0300"):
+            self.assertEqual(self.cli("claim", "hb", k, CHRONOS_NOW=MON + "T10:00").stdout.strip(), "NOT_DUE", k)
+        self.assertEqual([n for n in os.listdir(self.st) if n.startswith("claim-")] if os.path.isdir(self.st) else [], [])
+
+
+class MidnightGap(unittest.TestCase):
+    def test_the_gap_across_midnight_is_checked_when_days_can_follow_each_other(self):
+        sys.path.insert(0, os.path.join(ROOT, "lib"))
+        bad = ["00:05", "23:55"]
+        for days in ("daily", "weekdays", "mon,tue", "sun,mon"):
+            _c, errs = C.validate_schedule({"times": bad, "days": days, "catchup_min": 60})
+            self.assertTrue(errs, days)
+        for days in ("sat", "sat,mon", "mon,wed,fri"):
+            _c, errs = C.validate_schedule({"times": bad, "days": days, "catchup_min": 60})
+            self.assertEqual(errs, [], days)
+        _c, errs = C.validate_schedule({"times": ["00:05", "23:50"], "days": "daily", "catchup_min": 60})
+        self.assertEqual(errs, [])                                                    # exactly 15 minutes
+        with self.assertRaises(ValueError):
+            C.validate_job_record({"id": "wr", "times": bad, "days": "daily"})
+
+    def test_days_of_the_month_with_times_is_refused_in_a_record(self):
+        with self.assertRaises(ValueError):
+            C.validate_job_record({"id": "dm", "times": ["09:00", "10:00"], "days": "dom:5"})
+
+
+class MetaIsPlainJson(unittest.TestCase):
+    def test_nan_and_infinity_are_refused(self):
+        for bad in (float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                C.check_meta({"x": bad})
+        self.assertEqual(C.check_meta({"x": 1.5}), {"x": 1.5})
+
+
+class ABadMetaDoesNotBreakTheSnapshot(Base):
+    def test_a_hand_edited_nan_gives_that_job_an_error_row_and_the_output_stays_strict_json(self):
+        raw = json.dumps([hl(id="good"), hl(id="nanny")]).replace('"id": "nanny"', '"id": "nanny", "meta": {"x": NaN}')
+        open(self.e.cfg["jobs_file"], "w").write(raw)
+        out, r = api(self.e, ["snapshot"], now=MON + "T10:00")
+        json.loads(r.stdout, parse_constant=lambda c: (_ for _ in ()).throw(ValueError(c)))
+        rows = {x["id"]: x for x in out["schedules"]}
+        self.assertIn("error", rows["nanny"])
+        self.assertNotIn("error", rows["good"])
+
+
+class SessionTimesJobsNeedTheTalosRunner(Base):
+    jobs = [hb()]
+
+    def test_switching_to_the_hook_runner_is_refused_while_a_times_job_runs_in_a_session(self):
+        out, r = api(self.e, ["config", "set"], {"session_runner": "hook"}, expect=1)
+        e = err(r)
+        self.assertEqual(e["code"], "schedule_invalid")
+        self.assertIn("hb", e["message"])
+        self.assertEqual(json.load(open(self.e.cfg_path)).get("session_runner"), "talos")
+
+    def test_it_is_fine_for_a_headless_times_job(self):
+        self.e.set_jobs([hl()])
+        out, r = api(self.e, ["config", "set"], {"session_runner": "hook"})
+        self.assertEqual(r.returncode, 0)
+
+
+class PruneKeepsTheUiStrip(unittest.TestCase):
+    def test_prune_reaches_further_back_than_the_14_day_strip(self):
+        m = __import__("re").search(r"^STRIP_DAYS = (\d+)", open(os.path.join(ROOT, "ui", "server.py")).read(), __import__("re").M)
+        self.assertIsNotNone(m)
+        self.assertGreater(C.PRUNE_DAYS, int(m.group(1)))
+
+
+class TheUiCanRevertATimesJob(Base):
+    jobs = [hl(name="Multi")]
+
+    def setUp(self):
+        Base.setUp(self)
+        self.ui = UIServer(self.e)
+
+    def tearDown(self):
+        self.ui.stop()
+        Base.tearDown(self)
+
+    def rec(self):
+        return json.load(open(self.e.cfg["jobs_file"]))[0]
+
+    def test_times_null_turns_the_job_back_into_a_plain_one(self):
+        st, r = self.ui.req("POST", "/api/jobs/hb/schedule", {"times": None, "time": "08:30", "days": "weekdays", "catchup_min": 120})
+        self.assertEqual(st, 200, r)
+        self.assertNotIn("times", self.rec())
+        self.assertEqual(self.rec()["time"], "08:30")
+
+    def test_times_null_without_a_time_keeps_the_first_time(self):
+        st, r = self.ui.req("POST", "/api/jobs/hb/schedule", {"times": None, "days": "weekdays", "catchup_min": 120})
+        self.assertEqual(st, 200, r)
+        self.assertEqual((self.rec().get("times"), self.rec()["time"]), (None, "09:45"))
+
+    def test_restoring_a_snapshot_from_before_times_gives_the_plain_job_back(self):
+        self.e.set_jobs([job("pl", time="07:30", days="weekdays")])
+        st, r = self.ui.req("POST", "/api/jobs/pl/schedule", {"times": ["07:30", "11:00"], "days": "weekdays", "catchup_min": 180})
+        self.assertEqual(st, 200, r)
+        st, d = self.ui.req("GET", "/api/jobs/pl")
+        files = [x["file"] for x in d["history"]["jobs"]]
+        self.assertTrue(files, d["history"])
+        st, r = self.ui.req("POST", "/api/jobs/pl/restore", {"kind": "schedule", "file": files[-1]})
+        self.assertEqual(st, 200, r)
+        rec = next(j for j in json.load(open(self.e.cfg["jobs_file"])) if j["id"] == "pl")
+        self.assertNotIn("times", rec)
+        self.assertEqual(rec["time"], "07:30")
 
 
 if __name__ == "__main__":

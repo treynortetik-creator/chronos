@@ -608,7 +608,7 @@ def both_jobs(cfg):
 
 
 def set_config(cfg, values):
-    """Write config keys together, in one atomic write. Refuses session_runner=talos while any `both` job exists."""
+    """Write config keys together, in one atomic write. Refuses session_runner=talos while any `both` job exists, and session_runner=hook while any job with `times` runs in the session."""
     clean = {}
     for k, v in values.items():
         if k not in CONFIG_KEYS:
@@ -628,6 +628,11 @@ def set_config(cfg, values):
             if blockers:
                 raise WriteError("both_jobs_remain", "these jobs run in the session with a background backup; make each one session or headless first: " + ", ".join(blockers),
                                  [{"path": b, "message": "runner is both"} for b in blockers])
+        if clean.get("session_runner") == "hook":
+            stuck = [j["id"] for j in read_jobs(cfg) if isinstance(j, dict) and C.is_times(j) and j.get("in_session") is True]
+            if stuck:
+                raise WriteError("schedule_invalid", "these jobs have several times a day and run in the live session, which only the talos runner can do; change each one first: " + ", ".join(stuck),
+                                 [{"path": b, "message": "times job in a session"} for b in stuck])
         try:
             cur = json.load(open(path, encoding="utf-8"))
             if not isinstance(cur, dict):

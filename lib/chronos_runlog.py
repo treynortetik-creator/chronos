@@ -462,6 +462,8 @@ def claim_run(cfg, jid, req, at=None):
             return {"ok": False, "reason": "not_due"}
         if at >= f + datetime.timedelta(minutes=C.window_minutes(job)):
             return {"ok": False, "reason": "window_passed"}
+        if C.is_times(job) and C.newer_slot_started(job, ds, at):
+            return {"ok": False, "reason": "window_passed"}      # superseded: a later slot has started and covers this one
         if os.path.exists(cfg["pause_all"]) or C.is_paused(cfg, jid):
             return {"ok": False, "reason": "paused"}
     ran = os.path.exists(C.ran_path(cfg, jid, ds))
@@ -472,10 +474,14 @@ def claim_run(cfg, jid, req, at=None):
     os.makedirs(cfg["state_dir"], exist_ok=True)
     cp = C.claim_path(cfg, jid, ds)
     C.sweep_stale_claim(cfg, cp, at)
+    if C.other_run_live(cfg, job, ds, at):
+        return {"ok": False, "reason": "running_elsewhere"}
     try:
         os.mkdir(cp)
     except FileExistsError:
         return {"ok": False, "reason": "running_elsewhere"}
+    if manual:
+        C.clear_stalled_slots(cfg, job, at)
     if manual:                                   # under the claim: Run now clears the day's failure, stall and (with `again`) done marker
         for pth in (C.failed_path(cfg, jid, ds), C.stalled_path(cfg, jid, ds)) + ((C.ran_path(cfg, jid, ds),) if again else ()):
             try:
@@ -643,10 +649,13 @@ def start_headless(cfg, jid, again=False, at=None):
     os.makedirs(cfg["logs_dir"], exist_ok=True)
     cp = C.claim_path(cfg, jid, ds)
     C.sweep_stale_claim(cfg, cp, at)
+    if C.other_run_live(cfg, job, ds, at):
+        return _refuse("already_running", "this job is already running")
     try:
         os.mkdir(cp)
     except FileExistsError:
         return _refuse("already_running", "this job is already running")
+    C.clear_stalled_slots(cfg, job, at)
     for pth in (C.failed_path(cfg, jid, ds), C.stalled_path(cfg, jid, ds)) + ((C.ran_path(cfg, jid, ds),) if again else ()):
         try:
             os.remove(pth)

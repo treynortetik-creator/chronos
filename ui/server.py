@@ -290,6 +290,16 @@ def usage_for_job(jid):
     return {"last": slim_run(u["last"]), "week": u["week"] or None}
 
 
+def describe_job_safe(job):
+    """One broken record must not take the whole job list down: it gets a row that says so."""
+    try:
+        return describe_job(job)
+    except Exception as e:
+        jid = job.get("id") if isinstance(job, dict) else None
+        return {"id": jid, "name": (job.get("name") if isinstance(job, dict) else None) or jid, "schedule_ok": False,
+                "schedule_text": "Schedule unreadable", "error": str(e), "enabled": False, "running": False}
+
+
 def describe_job(job, detail=False):
     n = now()
     jid = job["id"]
@@ -297,7 +307,8 @@ def describe_job(job, detail=False):
                                    "enabled", "in_session", "once", "created", "updated")}
     if C.is_times(job):
         out["times"] = job.get("times")
-        out["time"] = job["times"][0]                          # the form's single time field is the mirror of times[0] even when the record omits `time`
+        if isinstance(job.get("times"), list) and job["times"]:
+            out["time"] = job["times"][0]                      # the form's single time field is the mirror of times[0] even when the record omits `time`
     out["clock"] = C.clock_on(job)
     out["kind"] = "command" if C.is_command(job) else "claude"
     out["command"] = job.get("command") if C.is_command(job) else None
@@ -319,7 +330,8 @@ def describe_job(job, detail=False):
     today = n.date()
     tds = C.day_str(today)
     ev_claims = C.event_claims(CFG, jid, tds)
-    tkeys = C.marker_keys(job, today) if C.is_times(job) else [tds]            # a job with `times` has one claim per slot
+    # a job with `times` has one claim per slot, and a Run now holds an ad-hoc key that is no slot: any live claim of the job is "running"
+    tkeys = (C.live_claims(CFG, jid, n) if C.is_times(job) else [tds])
     live = [k for k in tkeys if os.path.isdir(C.claim_path(CFG, jid, k)) and not os.path.exists(C.ran_path(CFG, jid, k))]
     out["running"] = bool(live) or bool(ev_claims)
     try:
@@ -520,7 +532,11 @@ def update_schedule(jid, body):
             for k in ("time", "days", "once", "catchup_min"):
                 if k in body:
                     merged[k] = body[k]
-            if C.is_times(job) or body.get("times") is not None:
+            revert = "times" in body and body["times"] is None and C.is_times(job)
+            if revert:
+                # an explicit `times: null` turns the job back into a plain single-time job (the form's `time`, else the first of the list)
+                merged["time"] = body.get("time") or (job.get("times") or [job.get("time")])[0]
+            elif C.is_times(job) or body.get("times") is not None:
                 # a job with several times keeps them: the form's single `time` is the mirror of times[0], so the same value saves as-is;
                 # a different single time is refused rather than silently dropping the list. Sending `times` replaces the list.
                 merged["times"] = body["times"] if body.get("times") is not None else job.get("times")
@@ -586,6 +602,7 @@ def restore_schedule(jid, fname):
     except Exception:
         raise ApiError(404, "that snapshot has no entry for this job")
     body = {k: ent.get(k) for k in SCHEDULE_FIELDS if k in ent}
+    body["times"] = ent.get("times")            # a snapshot from before `times` restores to a plain job (null reverts), one with times restores the list
     return update_schedule(jid, body)
 
 
@@ -1072,7 +1089,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._static("favicon.png")
         if path == "/api/jobs":
             jobs = load_jobs()
-            return self._json(200, {"status": global_status(), "jobs": [describe_job(j) for j in jobs]})
+            return self._json(200, {"status": global_status(), "jobs": [describe_job_safe(j) for j in jobs]})
         m = JOB_PATH.match(path)
         if m and not m.group(2):
             return self._json(200, read_job_detail(m.group(1)))

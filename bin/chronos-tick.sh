@@ -62,7 +62,7 @@ if [ -z "$DRY" ]; then
   done <<< "$WAITS"
 fi
 
-# ---- housekeeping: slot markers of a job with `times` are pruned after 8 days (a plain job's markers are never touched)
+# ---- housekeeping: slot markers of a job with `times` are pruned after 15 days (a plain job's markers are never touched)
 [ -z "$DRY" ] && ch_step "$CH_STEP_DEADLINE_S" prune "$PYBIN" "$DIR/chronos" prune >/dev/null 2>>"$CH_LOGS/chronos.log"
 
 # ---- event pass. Runs AFTER the clock jobs are claimed, so a slow Gmail/GitHub poll never delays a scheduled job

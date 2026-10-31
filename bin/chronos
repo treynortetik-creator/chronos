@@ -7,7 +7,7 @@
   chronos claim <id> [YYYY-MM-DD[THHMM]] [--unattended]   atomic claim: CLAIMED | ALREADY_DONE | FAILED_TODAY | RUNNING_ELSEWHERE | NOT_DUE
   chronos done <id> [key]              touch the done-marker and release the claim (a job with `times`: the key is its slot, default the current one)
   chronos release <id> [key]           release a claim without marking done
-  chronos prune                        delete slot markers (a job with `times`) older than 8 days
+  chronos prune                        delete slot markers (a job with `times`) older than 15 days
   chronos run <id> [--again]           start a job now, headless, in the background
   chronos prompt <id> [date]           print the exact prompt a headless run would get
   chronos prompt <id> --event <file> <type>   the prompt of an EVENT run (trusted instructions + the untrusted event block)
