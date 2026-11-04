@@ -4,6 +4,7 @@ problem. Real CLI, throwaway home, fixed clock. A failing test here is a finding
 Run: python3 tests/test_review_pr5.py   (not in tests/run.sh: some tests fail on purpose until fixed)."""
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -200,10 +201,41 @@ class Compat(unittest.TestCase):
 
 
 # ----------------------------------------------------------------------------------------------- (4)/(5) hygiene, version
+def scrub_commit_headers(log):
+    """Drop the `Author:` / `Commit:` header line of every commit in `git log -p` output; keep the message and the diff. Only a header line
+    (right after a `commit <sha>` line, before the blank line that opens the message) is dropped: an author-looking line in a message is not."""
+    out, in_header = [], False
+    for line in log.split("\n"):
+        if line.startswith("commit ") and re.match(r"commit [0-9a-f]{7,40}", line):
+            in_header = True
+            out.append(line)
+        elif in_header and line == "":
+            in_header = False
+            out.append(line)
+        elif in_header and re.match(r"(Author|Commit|AuthorDate|CommitDate|Merge):", line):
+            continue
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
 class Hygiene(unittest.TestCase):
+    def test_header_scrub_keeps_the_strict_check_for_messages_and_diffs(self):
+        log = ("commit " + "a" * 40 + "\nAuthor: Someone <1234+someone@" + "users.noreply.github.com>\nDate:   Mon\n\n    message ok\n\n"
+               "diff --git a/f b/f\n+x = 1\n")
+        clean = scrub_commit_headers(log)
+        self.assertNotIn("noreply.github.com", clean)
+        self.assertIn("message ok", clean)
+        for bad in ("    mail me at real.person@" + "example.com\n", "+path = '/Us" + "ers/someone/x'\n", "+path = '/ho" + "me/alex/x'\n"):
+            leaked = scrub_commit_headers(log + bad)
+            self.assertTrue(re.search(r"/Users/[A-Za-z]|/home/[a-z]+/|[\w.+-]+@[\w-]+\.[\w.]+", leaked.replace("noreply@anthropic.com", "")), bad)
+        msg = scrub_commit_headers(log.replace("message ok", "Author: leaked@" + "example.com"))
+        self.assertIn("leaked@" + "example.com", msg)               # in the message body, so still scanned
+
     def test_pr_diff_and_messages_have_no_home_paths_or_emails(self):
+        # Scan the diff content and the commit messages. The Author/Commit header lines are skipped: a GitHub noreply address there is normal on a public repo.
         diff = subprocess.run(["git", "log", "-p", "origin/main..HEAD"], cwd=ROOT, capture_output=True, text=True).stdout
-        import re
+        diff = scrub_commit_headers(diff)
         self.assertIsNone(re.search(r"/Users/[A-Za-z]|/home/[a-z]+/", diff))
         emails = set(re.findall(r"[\w.+-]+@[\w-]+\.[\w.]+", diff)) - {"noreply@anthropic.com"}
         self.assertEqual(emails, set())

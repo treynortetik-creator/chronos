@@ -750,8 +750,9 @@ def run_now_key(job, at):
 
 
 def live_claims(cfg, jid, at=None):
-    """Run keys of the job's live claims, whatever their shape (a slot, an ad-hoc Run now key, a date). Stale ones are swept first. Sorted."""
-    at = at or now()
+    """Run keys of the job's claims, whatever their shape (a slot, an ad-hoc Run now key, a date). Sorted. A READ: it never deletes anything, so
+    a claim that merely looks stale (a session claim has no pid and is older than stale_claim_min) still counts as live here. Only `claim`
+    sweeps a stale claim, and only one of its own key (as on 0.3.1)."""
     rx = re.compile(r"^claim-%s-(\d{4}-\d{2}-\d{2}(?:T\d{4})?)\Z" % re.escape(jid))
     try:
         names = os.listdir(cfg["state_dir"])
@@ -760,10 +761,7 @@ def live_claims(cfg, jid, at=None):
     out = []
     for n in names:
         m = rx.match(n)
-        if not m:
-            continue
-        cp = os.path.join(cfg["state_dir"], n)
-        if os.path.isdir(cp) and not sweep_stale_claim(cfg, cp, at):
+        if m and os.path.isdir(os.path.join(cfg["state_dir"], n)):
             out.append(m.group(1))
     return sorted(out)
 
@@ -773,21 +771,37 @@ def other_run_live(cfg, job, ds, at=None):
     return is_times(job) and not job.get("once") and any(k != ds for k in live_claims(cfg, job["id"], at))
 
 
-def settle_run_now(cfg, job, ds, at=None):
-    """A Run now of a job with `times` that SUCCEEDED (ds is its ad-hoc key, not a slot) settles the job's stalled slots of yesterday and
-    today, so launch_stalled stops reporting a job that has just run. Called after the run, never at claim time: a Run now that fails
-    leaves the stall as it was. A stalled slot whose window is still open is marked ran (the Run now did that work), so the tick does not
-    run it again straight away; one whose window is over is only cleared. A slot's failed marker is run history and stays."""
+def settle_run_now(cfg, job, ds, at=None, own=None):
+    """A Run now of a job with `times` that SUCCEEDED settles the job's stalled slots, so launch_stalled stops reporting a job that has just
+    run. A Run now is recognised by its owner file (`trigger` == "run_now"; `own` is that file when the caller already holds it), never by
+    its key. Called after the run, never at claim time: a Run now that fails leaves the stall as it was. Of the stalled slots only the NEWEST
+    slot that had started when the Run now was claimed, and only if it is on that same day and its window was still open then, is marked ran
+    (the Run now did that slot's work, so the tick does not run it again). Every other stalled slot is only cleared; yesterday's are never
+    marked. A slot's failed marker is run history and stays."""
     if not (is_times(job) and not job.get("once")) or not isinstance(ds, str) or not SLOT_RE.match(ds):
         return
-    at = at or now()
-    if ds in [k for back in (1, 0) for k, _f in slots(job, at.date() - datetime.timedelta(days=back))]:
-        return                      # a slot's own run is not a Run now
-    for back in (1, 0):
-        for k, f in slots(job, at.date() - datetime.timedelta(days=back)):
+    if own is None:
+        try:
+            with open(owner_path(cfg, job["id"], ds), encoding="utf-8") as fh:
+                own = json.load(fh)
+        except (OSError, ValueError, KeyError, TypeError):
+            return
+    if not isinstance(own, dict) or own.get("trigger") != "run_now":
+        return
+    try:
+        t = datetime.datetime.fromisoformat(own["claimed_at"])
+        if t.tzinfo is not None:
+            t = t.astimezone(zone_info()).replace(tzinfo=None)
+    except (KeyError, ValueError, TypeError):
+        t = at or now()
+    days = [t.date() - datetime.timedelta(days=back) for back in (1, 0)]
+    started = [(k, f) for d in days for k, f in slots(job, d) if f <= t]
+    newest = started[-1] if started else None
+    for d in days:
+        for k, f in slots(job, d):
             if not os.path.exists(stalled_path(cfg, job["id"], k)):
                 continue
-            if f <= at < f + datetime.timedelta(minutes=window_minutes(job)):
+            if newest is not None and k == newest[0] and f.date() == t.date() and t < f + datetime.timedelta(minutes=window_minutes(job)):
                 try:
                     open(ran_path(cfg, job["id"], k), "a").close()
                 except OSError:
@@ -1608,7 +1622,7 @@ def start_run(cfg, jid, again=False):
         logf.write("%s CLAIMED %s -> spawning run (manual)\n" % (time.strftime("%F %T"), jid))
         logf.flush()
         subprocess.Popen(["/bin/bash", run_script, jid, ds], stdin=subprocess.DEVNULL, stdout=logf,
-                         stderr=subprocess.STDOUT, start_new_session=True, cwd=HOME, env=scrubbed_env(cfg))
+                         stderr=subprocess.STDOUT, start_new_session=True, cwd=HOME, env=scrubbed_env(cfg, {"CHRONOS_TRIGGER": "run_now"}))      # the owner file says so
         logf.close()
     except Exception as e:
         try:

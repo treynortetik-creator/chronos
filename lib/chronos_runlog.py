@@ -594,7 +594,7 @@ def finish_run(cfg, jid, req, at=None):
         C.disable_once(cfg, jid)                              # a finished one-shot switches itself off
         job = next((j for j in C.load_jobs(cfg) if isinstance(j, dict) and j.get("id") == jid), None)
         if job is not None:
-            C.settle_run_now(cfg, job, ds, at)                # a Run now that worked settles the job's stalled slots
+            C.settle_run_now(cfg, job, ds, at, own)                # a Run now that worked settles the job's stalled slots
     return {"ok": True}
 
 

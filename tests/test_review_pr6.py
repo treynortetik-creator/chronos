@@ -116,6 +116,114 @@ class RunNowDoesNotReopenAStalledSlot(Base):
         self.assertEqual(self.due_at(MON + "T12:45"), [])
 
 
+class ReadsNeverSweepAClaim(Base):
+    """A session claim has no pid, so it looks stale once it is older than stale_claim_min (45 minutes). Only `claim` of the SAME key may sweep it
+    (as on 0.3.1). A read (`due`, `due --dry`, `api due --for session`, `api snapshot`) deletes nothing and offers nothing behind a claim."""
+    jobs = [hb(times=["09:45", "10:30"], catchup_min=60, in_session=True, headless=True)]
+    LATE = MON + "T10:41"                                                   # 56 minutes after the claim
+
+    def start(self):
+        self.assertTrue(self.claim(RID[0], MON + "T0945", MON + "T09:50")["ok"])
+        self.assertTrue(os.path.isdir(self.p("claim-hb-" + MON + "T0945")))
+
+    def still_there(self):
+        self.assertTrue(os.path.isdir(self.p("claim-hb-" + MON + "T0945")), "a read swept the claim")
+        self.assertTrue(os.path.exists(self.p("claim-hb-" + MON + "T0945.owner.json")))
+
+    def test_the_headless_due_and_its_dry_run_keep_the_claim_and_print_no_second_slot(self):
+        self.start()
+        for argv in (["due"], ["due", "--dry"]):
+            r = self.cli(*argv, CHRONOS_NOW=self.LATE, TZ=NY)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertNotIn("T1030", r.stdout)
+            self.assertEqual(r.stdout.strip(), "")
+            self.still_there()
+
+    def test_snapshot_and_the_session_due_list_keep_the_claim(self):
+        self.start()
+        out, _ = api(self.e, ["due", "--for", "session"], now=self.LATE)
+        self.assertEqual(out["due"], [])
+        self.still_there()
+        s = sched(self.e, "hb", now=self.LATE)
+        self.assertEqual(s["today"], "running")
+        self.still_there()
+        api(self.e, ["snapshot"], now=self.LATE)
+        self.still_there()
+
+
+
+class AClaimStillSweepsItsOwnStaleKey(Base):
+    jobs = [hb(times=["09:45", "12:15"])]
+
+    def test_a_claim_of_the_same_key_sweeps_its_own_stale_claim(self):
+        self.assertTrue(self.claim(RID[0], K[0], MON + "T09:50")["ok"])
+        self.assertTrue(self.claim(RID[1], K[0], MON + "T10:41")["ok"])               # exactly as on 0.3.1: the dead claim of the same key is replaced
+        self.assertEqual(json.load(open(self.p("claim-hb-%s.owner.json" % K[0])))["run_id"], RID[1])
+
+
+class RunNowSettlesOnlyTheNewestStartedSlot(Base):
+    """settle_run_now marks as ran only the newest slot that had started when the Run now was claimed (same day, window open); other stalled slots are only cleared."""
+    jobs = [hb()]                                                           # 09:45 12:15 14:45 17:15, windows stay open all day
+
+    def run_now(self, at, done):
+        self.assertTrue(self.claim(RID[0], None, at, manual=True)["ok"])
+        self.assertEqual(self.finish(RID[0], done), {"ok": True})
+
+    def test_an_older_stalled_slot_is_cleared_not_marked_ran(self):
+        self.e.touch(self.st, "stalled-hb-" + K[0])
+        self.run_now(MON + "T12:40", MON + "T12:42")                         # 12:15 is the newest started slot, and it did not stall
+        self.assertFalse(os.path.exists(self.p("stalled-hb-" + K[0])))
+        self.assertFalse(os.path.exists(self.p("ran-hb-" + K[0])))
+
+    def test_the_newest_started_slot_when_stalled_is_marked_ran_and_the_older_one_only_cleared(self):
+        self.e.touch(self.st, "stalled-hb-" + K[0])
+        self.e.touch(self.st, "stalled-hb-" + K[1])
+        self.run_now(MON + "T12:40", MON + "T12:42")
+        self.assertTrue(os.path.exists(self.p("ran-hb-" + K[1])))
+        self.assertFalse(os.path.exists(self.p("ran-hb-" + K[0])))
+        self.assertFalse(os.path.exists(self.p("stalled-hb-" + K[0])))
+        self.assertFalse(os.path.exists(self.p("stalled-hb-" + K[1])))
+
+    def test_a_slot_that_starts_after_the_run_now_was_claimed_is_not_marked(self):
+        self.e.touch(self.st, "stalled-hb-" + K[1])
+        self.run_now(MON + "T12:10", MON + "T12:20")                         # claimed before 12:15, finished after it
+        self.assertFalse(os.path.exists(self.p("ran-hb-" + K[1])))
+
+    def test_mondays_late_stall_is_cleared_but_never_marked_by_a_tuesday_run_now(self):
+        tue = "2026-10-06"
+        self.e.touch(self.st, "stalled-hb-" + K[3])                          # Monday 17:15
+        self.run_now(tue + "T09:00", tue + "T09:05")                         # before Tuesday's first slot: Monday 17:15 is the newest started slot
+        self.assertFalse(os.path.exists(self.p("stalled-hb-" + K[3])))
+        self.assertFalse(os.path.exists(self.p("ran-hb-" + K[3])), "yesterday's slot was marked ran")
+
+
+class ARunNowIsRecognisedByItsOwnerFile(Base):
+    """settle is keyed on the owner file's trigger == run_now, not on the key being 'not a current slot'."""
+    jobs = [hb(times=["09:45", "12:15"], catchup_min=60, in_session=True, headless=True)]
+
+    def notice(self, ds, trigger):
+        self.e.touch(self.st, "stalled-hb-" + MON + "T1215")
+        with open(self.p("claim-hb-%s.owner.json" % ds), "w") as fh:
+            json.dump({"run_id": RID[0], "id": "hb", "ds": ds, "runner": "headless", "claimed_at": MON + "T12:40:00-04:00",
+                       "manual": trigger == "run_now", "trigger": trigger}, fh)
+        r = self.cli("notice", "hb", ds, "/dev/null", "/dev/null", "ok", CHRONOS_NOW=MON + "T12:42", TZ=NY)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_a_clock_run_under_a_key_that_is_no_current_slot_settles_nothing(self):
+        self.notice(MON + "T1337", "clock")
+        self.assertTrue(os.path.exists(self.p("stalled-hb-" + MON + "T1215")))
+
+    def test_a_run_now_settles(self):
+        self.notice(MON + "T1337", "run_now")
+        self.assertFalse(os.path.exists(self.p("stalled-hb-" + MON + "T1215")))
+        self.assertTrue(os.path.exists(self.p("ran-hb-" + MON + "T1215")))
+
+    def test_without_an_owner_file_nothing_is_settled(self):
+        self.e.touch(self.st, "stalled-hb-" + MON + "T1215")
+        self.cli("notice", "hb", MON + "T1337", "/dev/null", "/dev/null", "ok", CHRONOS_NOW=MON + "T12:42", TZ=NY)
+        self.assertTrue(os.path.exists(self.p("stalled-hb-" + MON + "T1215")))
+
+
 class PruneReportsAndLogs(Base):
     jobs = [hl()]
 
