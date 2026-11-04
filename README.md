@@ -195,7 +195,9 @@ A JSON list of objects:
 | `id` | string | `^[a-z0-9-]{2,40}$`. Names the folder and every marker file. |
 | `name` | string | Display name, up to 60 characters. |
 | `description` | string | One line, shown on the dashboard. |
-| `time` | `"HH:MM"` | 24-hour local fire time. |
+| `time` | `"HH:MM"` | 24-hour local fire time. With `times` it mirrors `times[0]`, so an older tool still reads a valid job. |
+| `times` | list of `"HH:MM"` | Optional. Several fire times a day instead of one, see [Several times a day](#several-times-a-day). A job has `time` or `times`, never two different schedules. |
+| `meta` | object | Optional. Opaque JSON a client keeps on the job (at most 4 KiB as canonical JSON). Chronos never reads it, but an edit to it holds the job for approval like a prompt edit. |
 | `days` | string | `daily`, `weekdays`, a list like `mon,wed,fri`, or `dom:1,15` (days of month). |
 | `once` | `"YYYY-MM-DDTHH:MM"` or `null` | Makes it a one-shot. `time` and `days` are then ignored. The job disables itself after a successful run. |
 | `catchup_min` | int 15-1440 | How long after the fire time Chronos may still start it. Default 180. |
@@ -210,6 +212,43 @@ A JSON list of objects:
 | `allowed_tools` | list | Tool list for this job's **event** runs, and for its **scheduled** runs when `restricted` is `true` (`--allowedTools` syntax). Default: the `event_allowed_tools` config key. |
 | `restricted` | bool | `true`: scheduled runs of this job get the narrow tool list (no `--dangerously-skip-permissions`, none of `claude_args`). Default `false` (unchanged behaviour). See [Restricted jobs](#restricted-jobs). |
 | `created`, `updated` | ISO timestamp | Bookkeeping. |
+
+### Several times a day
+
+`"times": ["09:45", "12:15", "14:45", "17:15"]` fires one job at each of those times on every day `days` allows. Each time is a **slot**,
+and a slot is claimed, run, reported and marked on its own: the run key (`ds`) of a slot is the date and the time, `2026-10-30T0945`, so its
+markers are `ran-<id>-2026-10-30T0945`, `claim-<id>-...`, `failed-<id>-...`, and its report `reports/<id>-2026-10-30T0945.md`. A job with a
+plain `time` keeps the date as its key, exactly as before.
+
+- Rules: 1 to 24 times, each `HH:MM`, strictly ascending, each at least 15 minutes after the one before. Not with `once`. `days` can be `daily`,
+  `weekdays` or named days (not days of the month). `time`, if present, must equal `times[0]`. On days that can follow each other, the last
+  time of a day and the first of the next must also be 15 minutes apart (`["00:05", "23:55"]` is refused for a daily job).
+- **Only the newest open slot runs.** `catchup_min` keeps a slot open, but when a later slot has already started it covers the earlier one: a Mac that
+  wakes at 11:00 after slots at 09:00, 09:30 and 10:30 runs the 10:30 slot once, and the older two read as `missed`. `due`, `claim` (CLI and API,
+  `window_passed`) and the session offer all agree.
+- **One run of a job at a time.** While any slot (or a Run now) of the job holds a claim, no other slot of it is offered or claimed (`RUNNING_ELSEWHERE`);
+  the waiting slot starts once the run ends, if its window is still open. Two spring-forward slots that land on the same instant collapse to the first.
+- `catchup_min`, the grace period, the pause switches and approval all work per slot. A failed slot does not block the next one. The midnight rule
+  is per slot: a 23:30 slot with a 60 minute window is still offered at 00:05, on yesterday's key.
+- A slot-key `claim` never falls back to the date key: a key that is not a slot of the job is `NOT_DUE` (or `bad_request` through the API).
+  Run now on a job with `times` uses an ad-hoc key (the date and the current minute, moved on to the next minute when that is a slot's own), so it
+  never uses up a slot. It shows as `running` in the snapshot and the UI, refuses to start while another run of the job is live, and a successful one
+  settles the job's stalled slot markers once it has finished (not when it starts, so a failed Run now leaves the stall as it was): a stalled slot whose
+  window is still open counts as run, so the tick does not run it again straight after; an older one is just cleared. A failed slot marker is run history and stays.
+- Switching a job between `time` and `times` the same day does not run it twice: the first slot counts as done when the date key ran, and a plain job
+  counts as done when the slot of its own time ran. `chronos done <id>` with no key closes the run that is going, else the latest slot that has started.
+- `chronos claim <id> <key>`, `chronos done <id> [key]`, `chronos release <id> [key]` take the slot key; without one a job with `times` uses its current slot.
+- A job with `times` cannot be armed as one in-session timer: the SessionStart hook skips it, and the API refuses `runner: session` for it unless
+  `session_runner` is `"talos"`. Background (headless) runs have no such limit.
+- `session_wait_notify_min` notifies once per **date** for such a job, not once per slot. `health` reports `missed_recently` only after two missed
+  slots in a row. The tick deletes slot markers (`ran-`, `failed-`, `stalled-`, `run-*.json`, `waitnotified-`) more than 15 days old (`chronos prune`; longer than the UI's 14-day strip, so a ran slot never turns into a red day). `chronos prune` also deletes per-slot reports and logs older than that, but always keeps each job's newest slot report and log.
+- `chronos api config set session_runner hook` is refused while a job with `times` runs in the session (the hook cannot arm it).
+- The UI keeps a job's `times` on save; `{"times": null}` turns it back into a plain single-time job, and restoring a snapshot from before `times` does the same.
+- **Release order for Talos.** `chronos api version` now has a `features` key, and a slot `ds` (`2026-10-30T0945`) is not a plain date. A Talos build that
+  parses these answers with a strict schema rejects both, and then reports the whole scheduler as unsupported, plain jobs included. Ship the Talos
+  tolerance for `features` and slot keys before installing a Chronos that has `times`.
+- The API `when` for it is `{"type": "times", "days": "weekdays", "times": ["09:45", "12:15"]}`. `chronos api version` lists `"features": ["times", "meta"]`
+  so a client can tell whether this install understands them.
 
 A job is **due** when it is enabled, scheduled today, past `time + grace_min`, inside `catchup_min`, not
 paused, has a `prompt.md` (a command job needs none), and has no `ran-`, `claim-` or `failed-` marker for the day. Event runs use their own `claim-<id>-<date>-<hash>` and
@@ -405,14 +444,14 @@ the run script or the UI depends on it, and with the defaults Chronos behaves ex
 
 ```bash
 chronos api version
-# {"api": 1, "chronos": "0.3.1", "session_runner": "hook", "approval_required": false}
+# {"api": 1, "chronos": "0.3.1", "session_runner": "hook", "approval_required": false, "features": ["times", "meta"]}
 chronos api snapshot                          # every job, its health, its next run
 echo '{"scope": {"id": "daily-digest"}, "paused": true}' | chronos api pause
 ```
 
 | Verb | In | Out |
 |---|---|---|
-| `version` | none | `api` (the major; the same major is compatible), `chronos`, `session_runner`, `approval_required` |
+| `version` | none | `api` (the major; the same major is compatible), `chronos`, `session_runner`, `approval_required`, `features` (`times`, `meta`) |
 | `snapshot` | none | `tz`, `as_of`, `session_runner`, `approval_required`, `paused_all`, `session_beat_age_s`, `tick_age_s`, `schedules[]`. Each schedule has `ds` (the day Chronos is showing: today, or yesterday while yesterday's window is open) and `date_key` (the date its claim and markers are stored under: always equal to `ds` for a recurring job, including after midnight while yesterday's window is open; for a one-shot, the date it was set for, even when that is not today or has passed) |
 | `detail <id>` | none | `schedule`, `prompt` (at most 64 KiB, `prompt_truncated`), `guard`, `next_runs`, `runs` (the 20 most recent, newest first: `run_id`, `ds`, `status`, `runner`, `started_at`, `ended_at`, `duration_s`, `has_report`; a day with only a failed/stalled marker has `run_id: null`) |
 | `validate` | a change (below) | `ok`, `normalized`, `preview` (`when_text`, `next_runs`, `tz`), `expected_etag`. Never writes |
@@ -598,7 +637,7 @@ real `claude`: the CLI is replaced by `tests/fake-claude.sh`.
 - Needs a logged-in Claude Code CLI. Chronos does not manage authentication.
 - The tick runs every 5 minutes, so jobs start up to 5 minutes (plus the grace period) after their time.
 - A sleeping laptop runs nothing; catch-up windows cover the gap after wake, not a day-long absence.
-- One run per job per day. Jobs that should run several times a day are modelled as several jobs.
+- One run per fire time. A job that should run several times a day lists them in `times` (see [Several times a day](#several-times-a-day)); there is no "every N minutes".
 - Success is judged by marker or exit code, not by reading Claude's answer. (Event runs also fail on an error result.)
 - Event triggers poll every 5 minutes (Gmail and GitHub every 10); nothing is pushed to the Mac. A webhook is
   queued and picked up at the next tick.
@@ -619,7 +658,7 @@ starts jobs in the right user session.
 
 **A job says Failed. Now what?** Open Runs, read the log. Fix the prompt, then press Run now; that clears the failed marker.
 
-**Can two things run at once?** Different jobs, yes. The same job on the same day, no.
+**Can two things run at once?** Different jobs, yes. The same job on the same day, no. A job with `times` runs one slot at a time too.
 
 **Can Claude message me mid-run?** If `notify` is configured, a clock run's preamble tells it about `bin/chronos-notify "text"`, and an event run gets exactly that one command added to its tool list.
 

@@ -167,8 +167,9 @@ def approve_on_disk(cfg, jid, via, content_hash=None):
 
 # --------------------------------------------------------------------------- validating and normalizing a change
 DRAFT_KEYS = ("id", "name", "description", "when", "catchup_min", "enabled", "runner", "permissions", "allowed_tools", "model", "notify", "prompt")
+OPTIONAL_DRAFT_KEYS = ("meta",)      # accepted on create and update, never required
 _WHEN_KEYS = {"daily": {"type", "time"}, "weekdays": {"type", "time"}, "days": {"type", "days", "time"},
-              "monthdays": {"type", "days", "time"}, "once": {"type", "at"}}
+              "monthdays": {"type", "days", "time"}, "once": {"type", "at"}, "times": {"type", "days", "times"}}
 
 
 def _is_int(v):
@@ -207,13 +208,20 @@ def check_prompt(text, ui=False):
 def when_to_fields(when):
     """The Talos `when` object -> Chronos {time, days, once}. Raises ValueError."""
     if not isinstance(when, dict) or when.get("type") not in _WHEN_KEYS:
-        raise ValueError("when.type must be one of: daily, weekdays, days, monthdays, once")
+        raise ValueError("when.type must be one of: daily, weekdays, days, monthdays, once, times")
     t = when["type"]
     extra = set(when) - _WHEN_KEYS[t]
     if extra or not _WHEN_KEYS[t] <= set(when):
         raise ValueError("when for %r takes exactly: %s" % (t, ", ".join(sorted(_WHEN_KEYS[t]))))
     if t == "once":
         return {"once": when["at"], "time": None, "days": None}
+    if t == "times":
+        dd = when["days"]
+        if isinstance(dd, list) and all(isinstance(x, str) for x in dd) and dd:
+            dd = ",".join(dd)
+        if not isinstance(dd, str):
+            raise ValueError('when.days for times must be "daily", "weekdays" or a list of mon..sun')
+        return {"once": None, "time": None, "times": when["times"], "days": dd}
     f = {"time": when["time"], "once": None}
     if t in ("daily", "weekdays"):
         f["days"] = t
@@ -236,7 +244,7 @@ def _check_fields(cfg, d, ui=False):
         errs.append({"path": path, "message": msg})
 
     for k in d:
-        if k not in DRAFT_KEYS:
+        if k not in DRAFT_KEYS + OPTIONAL_DRAFT_KEYS:
             bad(k, "unknown field %r%s" % (k, " (thread_id and other Talos-only fields must be stripped first)" if k == "thread_id" else ""))
     if "id" in d:
         if isinstance(d["id"], str) and C.ID_RE.match(d["id"]):
@@ -258,10 +266,12 @@ def _check_fields(cfg, d, ui=False):
     if "when" in d:
         try:
             f = when_to_fields(d["when"])
-            clean, e2 = C.validate_schedule({"once": f["once"], "time": f["time"], "days": f["days"], "catchup_min": 180})
+            clean, e2 = C.validate_schedule({"once": f["once"], "time": f["time"], "days": f["days"], "times": f.get("times"), "catchup_min": 180})
             if e2:
                 raise ValueError("; ".join(e2))
             probe = {"enabled": True, "catchup_min": 180, "time": clean["time"], "days": clean["days"], "once": clean.get("once")}
+            if clean.get("times") is not None:
+                probe["times"] = clean["times"]
             out["when"] = C.when_obj(probe)
             out["_sched"] = clean
         except (ValueError, KeyError, TypeError) as e:
@@ -303,6 +313,14 @@ def _check_fields(cfg, d, ui=False):
             out["notify"] = d["notify"]
         else:
             bad("notify", "notify must be one of: " + ", ".join(C.NOTIFY_MODES))
+    if "meta" in d:
+        if d["meta"] is None:
+            out["meta"] = None
+        else:
+            try:
+                out["meta"] = C.check_meta(d["meta"])
+            except ValueError as e:
+                bad("meta", str(e))
     if "prompt" in d:
         try:
             out["prompt"] = check_prompt(d["prompt"], ui)
@@ -324,6 +342,10 @@ def _build_record(cfg, n, now_s):
            "catchup_min": n["catchup_min"], "enabled": n["enabled"]}
     rec.update(_runner_fields(n["runner"]))
     rec.update({"notify": n["notify"], "once": sc.get("once")})
+    if sc.get("times") is not None:
+        rec["times"] = sc["times"]
+    if n.get("meta") is not None:
+        rec["meta"] = n["meta"]
     if n["model"]:
         rec["model"] = n["model"]
     if n["permissions"] == "restricted":
@@ -343,6 +365,15 @@ def _apply_set(job, n, now_s):
     if "when" in n:
         sc = n["_sched"]
         new.update({"time": sc["time"], "days": sc["days"], "once": sc.get("once")})
+        if sc.get("times") is not None:
+            new["times"] = sc["times"]
+        else:
+            new.pop("times", None)
+    if "meta" in n:
+        if n["meta"] is None:
+            new.pop("meta", None)
+        else:
+            new["meta"] = n["meta"]
     if "runner" in n:
         new.update(_runner_fields(n["runner"]))
     if "permissions" in n:
@@ -376,6 +407,12 @@ def _final_checks(job):
         raise invalid("runner", "a restricted job runs headless; it cannot run in the live session")
 
 
+def _check_times_runner(cfg, job):
+    """A job with `times` cannot be armed as one cron entry, so it cannot run in a live session under the hook runner."""
+    if C.is_times(job) and job.get("in_session") is True and cfg.get("session_runner") != "talos":
+        raise invalid("runner", "a job with times can run in a live session only when session_runner is talos; use runner headless, or switch the session runner")
+
+
 def plan_change(cfg, change, jobs, ui=False):
     """Validate a change against the current jobs. Never writes. Returns (normalized_change, plan).
     plan = {op, id, old, new (record or None), prompt (bytes or None = unchanged), etag (the etag the write produces, None for delete)}."""
@@ -401,8 +438,9 @@ def plan_change(cfg, change, jobs, ui=False):
             raise WriteError("schedule_conflict", "a job with that id already exists", [{"path": "draft.id", "message": "already exists"}])
         rec = _build_record(cfg, n, now_s)
         _final_checks(rec)
+        _check_times_runner(cfg, rec)
         prompt = n["prompt"].encode("utf-8")
-        norm = {"op": "create", "draft": dict((k, n[k]) for k in DRAFT_KEYS)}
+        norm = {"op": "create", "draft": dict((k, n[k]) for k in DRAFT_KEYS + OPTIONAL_DRAFT_KEYS if k in n and (n[k] is not None or k in DRAFT_KEYS))}
         return norm, {"op": op, "id": n["id"], "old": None, "new": rec, "prompt": prompt, "etag": C.record_etag(rec, prompt, b"")}
     jid = change.get("id")
     if not isinstance(jid, str) or not C.ID_RE.match(jid):
@@ -448,7 +486,8 @@ def plan_change(cfg, change, jobs, ui=False):
         raise
     new = _apply_set(old, n, now_s)
     _final_checks(new)
-    norm_set = dict((k, n[k]) for k in DRAFT_KEYS if k in n)
+    _check_times_runner(cfg, new)
+    norm_set = dict((k, n[k]) for k in DRAFT_KEYS + OPTIONAL_DRAFT_KEYS if k in n)
     prompt = n["prompt"].encode("utf-8") if "prompt" in n else None
     pb = prompt if prompt is not None else C._read_bytes(C.prompt_file(cfg, jid))
     return ({"op": "update", "id": jid, "base_etag": base, "set": norm_set},
@@ -569,7 +608,7 @@ def both_jobs(cfg):
 
 
 def set_config(cfg, values):
-    """Write config keys together, in one atomic write. Refuses session_runner=talos while any `both` job exists."""
+    """Write config keys together, in one atomic write. Refuses session_runner=talos while any `both` job exists, and session_runner=hook while any job with `times` runs in the session."""
     clean = {}
     for k, v in values.items():
         if k not in CONFIG_KEYS:
@@ -589,6 +628,11 @@ def set_config(cfg, values):
             if blockers:
                 raise WriteError("both_jobs_remain", "these jobs run in the session with a background backup; make each one session or headless first: " + ", ".join(blockers),
                                  [{"path": b, "message": "runner is both"} for b in blockers])
+        if clean.get("session_runner") == "hook":
+            stuck = [j["id"] for j in read_jobs(cfg) if isinstance(j, dict) and C.is_times(j) and j.get("in_session") is True]
+            if stuck:
+                raise WriteError("schedule_invalid", "these jobs have several times a day and run in the live session, which only the talos runner can do; change each one first: " + ", ".join(stuck),
+                                 [{"path": b, "message": "times job in a session"} for b in stuck])
         try:
             cur = json.load(open(path, encoding="utf-8"))
             if not isinstance(cur, dict):

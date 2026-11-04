@@ -4,9 +4,10 @@
   chronos env                          shell assignments for the bash scripts
   chronos due [--dry]                  jobs the tick would start right now (id|date)
   chronos list                         every job, its schedule and next fire time
-  chronos claim <id> [YYYY-MM-DD] [--unattended]   atomic claim: CLAIMED | ALREADY_DONE | FAILED_TODAY | RUNNING_ELSEWHERE | NOT_DUE
-  chronos done <id>                    touch the done-marker and release the claim
-  chronos release <id>                 release a claim without marking done
+  chronos claim <id> [YYYY-MM-DD[THHMM]] [--unattended]   atomic claim: CLAIMED | ALREADY_DONE | FAILED_TODAY | RUNNING_ELSEWHERE | NOT_DUE
+  chronos done <id> [key]              touch the done-marker and release the claim (a job with `times`: the key is its slot, default the current one)
+  chronos release <id> [key]           release a claim without marking done
+  chronos prune                        delete slot markers (a job with `times`) older than 15 days
   chronos run <id> [--again]           start a job now, headless, in the background
   chronos prompt <id> [date]           print the exact prompt a headless run would get
   chronos prompt <id> --event <file> <type>   the prompt of an EVENT run (trusted instructions + the untrusted event block)
@@ -79,13 +80,23 @@ def main(argv):
             print("%-24s %-34s %-9s next: %s" % (j["id"], C.english(j), "on" if j.get("enabled") else "disabled",
                                                  C.iso(nf[0]) if nf else "-"))
     elif cmd == "claim" and args:
-        res = C.claim(cfg, args[0], unattended="--unattended" in args, ds=next((a for a in args[1:] if len(a) == 10 and a[4] == "-"), None))
+        res = C.claim(cfg, args[0], unattended="--unattended" in args, ds=next((a for a in args[1:] if not a.startswith("--")), None))
         print(res)
         return 0 if res == "CLAIMED" else 1
     elif cmd == "done" and args:
-        C.mark_done(cfg, args[0])
+        try:
+            C.mark_done(cfg, args[0], args[1] if len(args) > 1 else None)
+        except ValueError as e:
+            sys.stderr.write("%s\n" % e)
+            return 1
     elif cmd == "release" and args:
-        C.release(cfg, args[0])
+        try:
+            C.release(cfg, args[0], args[1] if len(args) > 1 else None)
+        except ValueError as e:
+            sys.stderr.write("%s\n" % e)
+            return 1
+    elif cmd == "prune":
+        C.prune_markers(cfg)
     elif cmd == "run" and args:
         try:
             C.start_run(cfg, args[0], again="--again" in args)
@@ -137,6 +148,10 @@ def main(argv):
             print("one-shot %s disabled in jobs.json" % args[0])
     elif cmd == "notice" and len(args) >= 4:
         C.write_notice(cfg, args[0], args[1], args[2], args[3], args[4] if len(args) > 4 else "ok")
+        if (args[4] if len(args) > 4 else "ok") == "ok":
+            job = next((j for j in C.load_jobs(cfg) if isinstance(j, dict) and j.get("id") == args[0]), None)
+            if job is not None:
+                C.settle_run_now(cfg, job, args[1])        # a successful Run now of a job with `times` settles its stalled slots
     else:
         sys.stderr.write(__doc__)
         return 2

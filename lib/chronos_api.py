@@ -52,7 +52,7 @@ def _last_run(cfg, jid, rows=None):
         for prefix, status in (("ran-", "ok"), ("failed-", "failed"), ("stalled-", "launch_stalled")):
             if n.startswith(prefix + jid + "-"):
                 ds = n[len(prefix) + len(jid) + 1:]
-                if len(ds) == 10 and ds[4] == "-" and ds[7] == "-" and (best is None or ds >= best[0]):
+                if C.SLOT_RE.match(ds) and (best is None or ds >= best[0]):
                     best = (ds, status)
     if best is None:
         return None
@@ -87,7 +87,7 @@ def _recent_runs(cfg, jid, rows=None):
         for prefix, status in (("ran-", "ok"), ("failed-", "failed"), ("stalled-", "launch_stalled")):
             if n.startswith(prefix + jid + "-"):
                 ds = n[len(prefix) + len(jid) + 1:]
-                if len(ds) == 10 and ds[4] == "-" and ds[7] == "-" and ds not in seen:
+                if C.SLOT_RE.match(ds) and ds not in seen:
                     seen.add(ds)
                     out.append((ds, 0.0, {"run_id": None, "ds": ds, "started_at": None, "runner": None, "trigger": "clock", "status": status,
                                           "has_report": os.path.isfile(C.report_path(cfg, jid, ds))}))
@@ -114,6 +114,9 @@ def describe(cfg, job, at, beat_age, rows=None):
     pb, gb = C._read_bytes(C.prompt_file(cfg, jid)), C._read_bytes(C.guard_file(cfg, jid))
     runner = C.job_runner(job)
     d, state = C.current_day(cfg, job, at)
+    slot_ds, slot_f = None, None
+    if C.is_times(job) and not job.get("once"):
+        slot_ds, _d, slot_f, _st = C.current_slot(cfg, job, at)      # the slot the job is "at"; its key is the run key (ds)
     paused = C.is_paused(cfg, jid)
     held = state == "held"
     enabled = job.get("enabled") is True
@@ -121,7 +124,7 @@ def describe(cfg, job, at, beat_age, rows=None):
     fire_end = None
     if state in ("waiting", "running") and C.clock_on(job):
         try:
-            fire_end = C.aware_iso(C.fire_dt(job, d) + C.datetime.timedelta(minutes=C.window_minutes(job)))
+            fire_end = C.aware_iso((slot_f or C.fire_dt(job, d)) + C.datetime.timedelta(minutes=C.window_minutes(job)))
         except Exception:
             fire_end = None
     editable, why = _editable(cfg, job, runner, len(pb))
@@ -133,11 +136,12 @@ def describe(cfg, job, at, beat_age, rows=None):
     etag, chash = C.record_etag(job, pb, gb), C.record_content_hash(job, pb, gb)
     rec = C.read_approved(cfg, jid)
     beat_bucket = "stale" if beat_age is None or beat_age > 180 else "fresh"
-    own = RL.read_owner(cfg, jid, C.day_str(d)) if state == "running" else None
+    run_ds = slot_ds or C.day_str(d)
+    own = RL.read_owner(cfg, jid, run_ds) if state == "running" else None
     last = _last_run(cfg, jid, rows)
-    state_rev = C.sha256_ref(C.canon([C.day_str(d), state, (own or {}).get("run_id") or "", (last or {}).get("run_id") or "", paused, held, beat_bucket]))
+    state_rev = C.sha256_ref(C.canon([run_ds, state, (own or {}).get("run_id") or "", (last or {}).get("run_id") or "", paused, held, beat_bucket]))
     prompt_text = pb.decode("utf-8", "replace")
-    return {
+    out = {
         "id": jid, "name": job.get("name") or jid, "description": job.get("description") or "",
         "kind": "command" if C.is_command(job) else "claude",
         "when": when, "when_text": when_text, "catchup_min": C.window_minutes(job),
@@ -145,13 +149,16 @@ def describe(cfg, job, at, beat_age, rows=None):
         "runner": runner or "headless", "permissions": C.job_permissions(job),
         "allowed_tools": list(job.get("allowed_tools") or []), "model": job.get("model") or None,
         "notify": C.job_notify_mode(job), "triggers_count": len(job.get("triggers") or []),
-        "next_run": C.aware_iso(nf[0]) if nf else None, "today": state, "ds": C.day_str(d), "date_key": C.date_key(job, at) if job.get("once") else C.day_str(d), "window_ends": fire_end,
+        "next_run": C.aware_iso(nf[0]) if nf else None, "today": state, "ds": run_ds, "date_key": C.date_key(job, at) if job.get("once") else run_ds, "window_ends": fire_end,
         "last_run": last,
         "prompt_preview": _strip_controls(prompt_text)[:PREVIEW_CHARS] if not C.is_command(job) else "",
         "prompt_bytes": len(pb), "editable": editable, "read_only_reason": why,
         "changed_outside": rec is None or rec["content_hash"] != chash,
         "etag": etag, "content_hash": chash, "state_rev": state_rev,
     }
+    if job.get("meta") is not None:
+        out["meta"] = C.check_meta(job["meta"])       # a hand-edited NaN would make the whole snapshot invalid JSON: that job gets an error row instead
+    return out
 
 
 def _beat_age(path, at):
@@ -214,7 +221,7 @@ def detail(cfg, jid):
 
 
 REPORT_MAX = 256 * 1024
-_DATE_KEY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
+_DATE_KEY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{4})?\Z")
 _RUN_ID = re.compile(r"r_[0-9A-HJKMNP-TV-Z]{26}\Z")
 
 
@@ -223,6 +230,8 @@ def _valid_date(v):
         return False
     try:
         datetime.date(int(v[:4]), int(v[5:7]), int(v[8:10]))
+        if len(v) > 10 and (int(v[11:13]) > 23 or int(v[13:15]) > 59):
+            return False
     except ValueError:
         return False
     return True
@@ -518,7 +527,8 @@ def dispatch(argv, cfg, stdin, stderr):
     verb = argv[0] if argv else ""
     args = argv[1:]
     if verb == "version":
-        return {"api": C.API_VERSION, "chronos": C.CHRONOS_API_VERSION, "session_runner": cfg["session_runner"], "approval_required": cfg["approval_required"]}
+        return {"api": C.API_VERSION, "chronos": C.CHRONOS_API_VERSION, "session_runner": cfg["session_runner"], "approval_required": cfg["approval_required"],
+                "features": list(C.FEATURES)}
     if verb == "snapshot":
         return snapshot(cfg)
     if verb == "detail":

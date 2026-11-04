@@ -49,7 +49,7 @@ EVFILE="${3:-}"; EHASH="${4:-}"; ETYPE="${5:-}"; EVENT=""
 case "$id" in ""|*[!a-z0-9-]*) echo "bad job id"; exit 1 ;; esac
 case "$EHASH" in *[!a-f0-9]*) echo "bad event hash"; exit 1 ;; esac
 case "$ETYPE" in *[!a-z]*) echo "bad event type"; exit 1 ;; esac
-case "$D" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) echo "bad date"; exit 1 ;; esac
+case "$D" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]|[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9][0-9][0-9]) ;; *) echo "bad date"; exit 1 ;; esac
 mkdir -p "$CH_STATE/reports" "$CH_LOGS"
 LOG="$CH_LOGS/$id-$D-$(date +%H%M).log"
 REPORT="$CH_STATE/reports/$id-$D.md"

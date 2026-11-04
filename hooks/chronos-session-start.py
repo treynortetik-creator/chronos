@@ -82,6 +82,8 @@ def arm_block(C, cfg, now):
                 continue
             if not C.clock_on(j):
                 continue            # event-only jobs have no clock time to arm
+            if C.is_times(j):
+                continue            # several times a day cannot be one in-session cron; such a job needs session_runner talos (or runs in the background)
             if C.is_held(cfg, j):
                 continue            # approval_required and its content is not what was approved: never arm it
             C.validate_job_record(j)
