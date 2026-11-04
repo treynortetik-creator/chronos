@@ -3,6 +3,7 @@
 session path, Run now on a job whose slot stalled, and pruning of per-slot reports and logs. Real CLI, fixed clock (CHRONOS_NOW)."""
 import json
 import os
+import subprocess
 import sys
 import unittest
 import warnings
@@ -159,6 +160,56 @@ class AClaimStillSweepsItsOwnStaleKey(Base):
         self.assertTrue(self.claim(RID[0], K[0], MON + "T09:50")["ok"])
         self.assertTrue(self.claim(RID[1], K[0], MON + "T10:41")["ok"])               # exactly as on 0.3.1: the dead claim of the same key is replaced
         self.assertEqual(json.load(open(self.p("claim-hb-%s.owner.json" % K[0])))["run_id"], RID[1])
+
+
+class ADeadHeadlessClaimDoesNotBlockLaterSlots(Base):
+    """A headless claim records its pid. If that pid is dead the run crashed: it no longer blocks (reads included) and any `claim` may sweep it.
+    A live pid blocks. A session claim has no pid and keeps blocking (never swept by reads or by another key)."""
+    jobs = [hb(times=["09:45", "12:15"], in_session=True, headless=True)]
+    LATER = MON + "T12:30"                                                  # past the 10 minute session grace of the 12:15 slot
+
+    def dead_pid(self):
+        pr = subprocess.Popen([sys.executable, "-c", "pass"])
+        pr.wait()
+        return pr.pid
+
+    def headless_claim(self, pid):
+        os.makedirs(self.p("claim-hb-" + K[0]))
+        with open(self.p("claim-hb-%s.owner.json" % K[0]), "w") as fh:
+            json.dump({"run_id": RID[0], "id": "hb", "ds": K[0], "runner": "headless", "claimed_at": MON + "T09:50:00-04:00",
+                       "manual": False, "trigger": "clock", "pid": pid}, fh)
+
+    def due(self):
+        r = self.cli("due", CHRONOS_NOW=self.LATER, TZ=NY)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.strip()
+
+    def test_a_dead_pid_claim_does_not_block_the_next_slot_and_only_a_claim_removes_it(self):
+        self.headless_claim(self.dead_pid())
+        self.assertEqual(self.due(), "hb|" + K[1])
+        self.assertTrue(os.path.isdir(self.p("claim-hb-" + K[0])), "a read removed the claim")
+        out, _ = api(self.e, ["due", "--for", "session"], now=self.LATER)
+        self.assertTrue(os.path.isdir(self.p("claim-hb-" + K[0])))
+        self.assertEqual(self.cli("claim", "hb", K[1], CHRONOS_NOW=self.LATER, TZ=NY).stdout.strip(), "CLAIMED")
+        self.assertFalse(os.path.isdir(self.p("claim-hb-" + K[0])), "the claim did not sweep the dead run's claim")
+        self.assertFalse(os.path.exists(self.p("claim-hb-%s.owner.json" % K[0])))
+
+    def test_a_dead_pid_claim_does_not_block_the_api_claim_either(self):
+        self.headless_claim(self.dead_pid())
+        self.assertTrue(self.claim(RID[1], K[1], self.LATER)["ok"])
+        self.assertFalse(os.path.isdir(self.p("claim-hb-" + K[0])))
+
+    def test_a_live_pid_still_blocks(self):
+        self.headless_claim(os.getpid())
+        self.assertEqual(self.due(), "")
+        self.assertEqual(self.cli("claim", "hb", K[1], CHRONOS_NOW=self.LATER, TZ=NY).stdout.strip(), "RUNNING_ELSEWHERE")
+        self.assertTrue(os.path.isdir(self.p("claim-hb-" + K[0])))
+
+    def test_a_session_claim_without_a_pid_still_blocks_and_is_not_swept_by_another_key(self):
+        self.assertTrue(self.claim(RID[0], K[0], MON + "T09:50")["ok"])
+        self.assertEqual(self.due(), "")
+        self.assertEqual(self.cli("claim", "hb", K[1], CHRONOS_NOW=self.LATER, TZ=NY).stdout.strip(), "RUNNING_ELSEWHERE")
+        self.assertTrue(os.path.isdir(self.p("claim-hb-" + K[0])))
 
 
 class RunNowSettlesOnlyTheNewestStartedSlot(Base):

@@ -761,9 +761,41 @@ def live_claims(cfg, jid, at=None):
     out = []
     for n in names:
         m = rx.match(n)
-        if m and os.path.isdir(os.path.join(cfg["state_dir"], n)):
+        if m and os.path.isdir(os.path.join(cfg["state_dir"], n)) and not claim_pid_dead(os.path.join(cfg["state_dir"], n)):
             out.append(m.group(1))
     return sorted(out)
+
+
+def claim_pid_dead(cp):
+    """True only when the claim's owner file records a pid (a headless run) and no such process exists: the run crashed holding the claim.
+    EPERM means the process exists. A claim with no pid (a session claim) or an unreadable owner file is never dead here."""
+    try:
+        with open(cp + ".owner.json", encoding="utf-8") as fh:
+            pid = json.load(fh).get("pid")
+    except (OSError, ValueError, AttributeError):
+        return False
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def sweep_dead_claims(cfg, jid):
+    """Called by an actual claim (never a read): remove this job's claims, of any key, whose recorded pid is dead."""
+    try:
+        names = os.listdir(cfg["state_dir"])
+    except OSError:
+        return
+    rx = re.compile(r"^claim-%s-\d{4}-\d{2}-\d{2}(?:T\d{4})?\Z" % re.escape(jid))
+    for n in names:
+        cp = os.path.join(cfg["state_dir"], n)
+        if rx.match(n) and os.path.isdir(cp) and claim_pid_dead(cp):
+            remove_claim(cp)
 
 
 def other_run_live(cfg, job, ds, at=None):
@@ -1044,6 +1076,7 @@ def claim(cfg, jid, unattended=False, at=None, ds=None):
     os.makedirs(cfg["state_dir"], exist_ok=True)
     cp = claim_path(cfg, jid, ds)
     sweep_stale_claim(cfg, cp, at)
+    sweep_dead_claims(cfg, jid)
     if os.path.exists(ran_path(cfg, jid, ds)) or prior_form_done(cfg, job, ds):
         return "ALREADY_DONE"
     if os.path.exists(failed_path(cfg, jid, ds)) or os.path.exists(stalled_path(cfg, jid, ds)):
@@ -1611,6 +1644,7 @@ def start_run(cfg, jid, again=False):
     os.makedirs(cfg["logs_dir"], exist_ok=True)
     cp = claim_path(cfg, jid, ds)
     sweep_stale_claim(cfg, cp)
+    sweep_dead_claims(cfg, jid)
     if other_run_live(cfg, job, ds):
         raise RunError(409, "This job is already running (claim held).", running=True)
     try:

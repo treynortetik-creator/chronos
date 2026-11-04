@@ -11,7 +11,7 @@
   - `chronos prune` also deletes per-slot reports (`reports/<id>-<date>T<hhmm>*.md`) and logs (`logs/<id>-<date>T<hhmm>-<hhmm>.log`) older than 15 days, always keeping each job's newest slot report and log.
   - **Clients must accept slot keys on a plain job.** After a `times` to `time` switch, `last_run` and `runs` can carry slot keys (`2026-10-05T0945`) until they age out of the 20-run window and the retention window.
   - **Version:** this changes the wire (`features`, slot keys, `when` for `times`), so the release commit bumps the version to 0.4.0. It is not bumped in this change.
-  - Reads never delete a claim: `due`, `due --dry`, `api due --for session` and `api snapshot` leave a stale-looking claim alone and treat it as live, as on 0.3.1. Only `claim` sweeps a stale claim, and only one of its own key.
+  - Reads never delete a claim: `due`, `due --dry`, `api due --for session` and `api snapshot` leave a stale-looking claim alone and treat it as live, as on 0.3.1. Only `claim` sweeps a stale claim, and only one of its own key. A claim that records a pid (a headless run) is live only while that pid exists (`os.kill(pid, 0)`; EPERM counts as alive): a crashed run's claim no longer blocks later slots on any path, and any `claim` or Run now removes it. A session claim has no pid and is never swept by a read or another key.
   - **Known limit:** a session claim has no pid, so a session run longer than `stale_claim_min` (45 minutes) can be swept by its own next claim.
   - **Known limit:** after switching `times` back to a single `time`, the job can run twice that day if an earlier slot was missed and a later one ran.
   - **Known limit:** the test harness mixes timezones (the clock and the claim timestamps are not always in the same zone).

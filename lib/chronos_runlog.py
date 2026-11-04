@@ -474,6 +474,7 @@ def claim_run(cfg, jid, req, at=None):
     os.makedirs(cfg["state_dir"], exist_ok=True)
     cp = C.claim_path(cfg, jid, ds)
     C.sweep_stale_claim(cfg, cp, at)
+    C.sweep_dead_claims(cfg, jid)
     if C.other_run_live(cfg, job, ds, at):
         return {"ok": False, "reason": "running_elsewhere"}
     try:
@@ -650,6 +651,7 @@ def start_headless(cfg, jid, again=False, at=None):
     os.makedirs(cfg["logs_dir"], exist_ok=True)
     cp = C.claim_path(cfg, jid, ds)
     C.sweep_stale_claim(cfg, cp, at)
+    C.sweep_dead_claims(cfg, jid)
     if C.other_run_live(cfg, job, ds, at):
         return _refuse("already_running", "this job is already running")
     try:
