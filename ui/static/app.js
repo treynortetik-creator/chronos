@@ -76,7 +76,7 @@
   }
   function fail(e) { toast(e.message || String(e), "bad"); }
 
-  function confirmDlg(title, text, okLabel, danger) {
+  function confirmDlg(title, text, okLabel, danger, extra) {
     return new Promise(function (resolve) {
       var dlg = document.getElementById("dlg");
       dlg.className = "";
@@ -84,6 +84,7 @@
       var done = function (v) { dlg.close(); resolve(v); };
       dlg.appendChild(h("h2", { text: title }));
       dlg.appendChild(h("p", { text: text }));
+      if (extra) dlg.appendChild(extra);
       dlg.appendChild(h("div", { class: "btns" },
         btn("Cancel", null, "", function () { done(false); }),
         btn(okLabel || "OK", null, danger ? "danger" : "primary", function () { done(true); })));
@@ -226,9 +227,19 @@
     });
   }
 
+  // `meta` is part of what an approval covers (content_hash), so it is shown wherever the job is shown and in the approve dialog.
+  // Pretty-printed JSON set with textContent only: nothing in it is ever parsed as markup.
+  function metaBlock(j) {
+    if (j.meta === undefined && !j.meta_error) return null;
+    var text = j.meta_error ? "meta is unreadable: " + j.meta_error : JSON.stringify(j.meta, null, 2);
+    return h("div", { class: "metablock" }, h("div", { class: "muted sm", text: "Meta (part of what approving covers)" }), h("pre", { class: "pre small", text: text }));
+  }
+
   // A job whose prompt or settings changed outside Chronos is on hold (approval_required). Approving takes the files as they are now.
   function approveOnDisk(j) {
-    confirmDlg("Approve " + j.name + " as it is on disk?", "This job's prompt or settings were changed outside Chronos, so it will not run. Read the Prompt and Guardrails tabs first. Approving lets it run exactly as it is now.", "Approve").then(function (ok) {
+    // j is the job as it was fetched and drawn: the meta shown in the dialog and the content_hash sent are the same object, and the server
+    // refuses (409) if the job changed since.
+    confirmDlg("Approve " + j.name + " as it is on disk?", "This job's prompt or settings were changed outside Chronos, so it will not run. Read the Prompt and Guardrails tabs and the meta below first. Approving lets it run exactly as it is now.", "Approve", false, metaBlock(j)).then(function (ok) {
       if (!ok) return;
       api("POST", "/api/jobs/" + j.id + "/approve", { content_hash: j.content_hash }).then(function () { toast("Approved " + j.name, "ok"); route(true); }).catch(fail);
     });
@@ -369,7 +380,7 @@
       history.replaceState(null, "", "#/job/" + j.id + "/" + t);
       renderJob(j, t);
     }
-    app.appendChild(head); app.appendChild(strip14(j)); app.appendChild(bar); app.appendChild(body);
+    app.appendChild(head); app.appendChild(strip14(j)); if (metaBlock(j)) app.appendChild(h("div", { class: "panel" }, metaBlock(j))); app.appendChild(bar); app.appendChild(body);
     ({ work: tabWork, schedule: tabSchedule, triggers: tabTriggers, model: tabModel, guard: tabGuard, history: tabHistory, runs: tabRuns }[tab] || tabWork)(j, body);
     if (j.running) every(4000, function () { api("GET", "/api/jobs/" + j.id).then(function (n) { if (!n.running) { toast(j.name + " finished.", "ok"); viewJob(j.id, tab); } }).catch(function () {}); });
   }

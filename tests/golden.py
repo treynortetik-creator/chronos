@@ -155,7 +155,7 @@ def generate(out_dir):
         run("probe-stalled", ["probe"], {}, extra=dict(probe_env, FAKE_MODE="hang"))
         run("probe", ["probe"], {}, extra=probe_env)
 
-        # ---- a job with several times a day, and `meta` (HB0). Appended last, so every golden above is unchanged.
+        # ---- a job with several times a day, and `meta`. Appended last, so every golden above is unchanged.
         slots3 = ["07:30", "10:00", "14:00"]
         when3 = {"type": "times", "days": "weekdays", "times": slots3}
         run("validate-times-error", ["validate"], draft("multi-run", when={"type": "times", "days": "weekdays", "times": ["07:30", "07:40"]}, runner="headless"), expect=1)

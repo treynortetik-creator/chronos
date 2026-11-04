@@ -379,6 +379,11 @@ def describe_job(job, detail=False):
     out["latest_log"] = next((r for r in runs if r["kind"] == "log"), None)
     out["latest_report"] = next((r for r in runs if r["kind"] == "report"), None)
     out["content_hash"] = C.job_content_hash(CFG, job)
+    if job.get("meta") is not None:
+        try:
+            out["meta"] = C.check_meta(job["meta"])         # content_hash covers meta, so the page must show it next to that hash
+        except ValueError as e:
+            out["meta_error"] = str(e)
     out["changed_outside"] = C.changed_outside(CFG, job)
     out["held"] = C.is_held(CFG, job)
     out["approval_required"] = CFG["approval_required"]

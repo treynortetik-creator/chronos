@@ -233,14 +233,15 @@ plain `time` keeps the date as its key, exactly as before.
 - A slot-key `claim` never falls back to the date key: a key that is not a slot of the job is `NOT_DUE` (or `bad_request` through the API).
   Run now on a job with `times` uses an ad-hoc key (the date and the current minute, moved on to the next minute when that is a slot's own), so it
   never uses up a slot. It shows as `running` in the snapshot and the UI, refuses to start while another run of the job is live, and a successful one
-  clears the job's stalled slot markers (a failed slot marker is run history and stays).
+  settles the job's stalled slot markers once it has finished (not when it starts, so a failed Run now leaves the stall as it was): a stalled slot whose
+  window is still open counts as run, so the tick does not run it again straight after; an older one is just cleared. A failed slot marker is run history and stays.
 - Switching a job between `time` and `times` the same day does not run it twice: the first slot counts as done when the date key ran, and a plain job
   counts as done when the slot of its own time ran. `chronos done <id>` with no key closes the run that is going, else the latest slot that has started.
 - `chronos claim <id> <key>`, `chronos done <id> [key]`, `chronos release <id> [key]` take the slot key; without one a job with `times` uses its current slot.
 - A job with `times` cannot be armed as one in-session timer: the SessionStart hook skips it, and the API refuses `runner: session` for it unless
   `session_runner` is `"talos"`. Background (headless) runs have no such limit.
 - `session_wait_notify_min` notifies once per **date** for such a job, not once per slot. `health` reports `missed_recently` only after two missed
-  slots in a row. The tick deletes slot markers (`ran-`, `failed-`, `stalled-`, `run-*.json`, `waitnotified-`) more than 15 days old (`chronos prune`; longer than the UI's 14-day strip, so a ran slot never turns into a red day).
+  slots in a row. The tick deletes slot markers (`ran-`, `failed-`, `stalled-`, `run-*.json`, `waitnotified-`) more than 15 days old (`chronos prune`; longer than the UI's 14-day strip, so a ran slot never turns into a red day). `chronos prune` also deletes per-slot reports and logs older than that, but always keeps each job's newest slot report and log.
 - `chronos api config set session_runner hook` is refused while a job with `times` runs in the session (the hook cannot arm it).
 - The UI keeps a job's `times` on save; `{"times": null}` turns it back into a plain single-time job, and restoring a snapshot from before `times` does the same.
 - **Release order for Talos.** `chronos api version` now has a `features` key, and a slot `ds` (`2026-10-30T0945`) is not a plain date. A Talos build that

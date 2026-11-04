@@ -773,14 +773,25 @@ def other_run_live(cfg, job, ds, at=None):
     return is_times(job) and not job.get("once") and any(k != ds for k in live_claims(cfg, job["id"], at))
 
 
-def clear_stalled_slots(cfg, job, at=None):
-    """A successful Run now clears the job's stalled slot markers of yesterday and today (what Run now does for a plain job's date key),
-    so launch_stalled stops reporting a job that has just run. A slot's failed marker is run history and stays."""
-    if not (is_times(job) and not job.get("once")):
+def settle_run_now(cfg, job, ds, at=None):
+    """A Run now of a job with `times` that SUCCEEDED (ds is its ad-hoc key, not a slot) settles the job's stalled slots of yesterday and
+    today, so launch_stalled stops reporting a job that has just run. Called after the run, never at claim time: a Run now that fails
+    leaves the stall as it was. A stalled slot whose window is still open is marked ran (the Run now did that work), so the tick does not
+    run it again straight away; one whose window is over is only cleared. A slot's failed marker is run history and stays."""
+    if not (is_times(job) and not job.get("once")) or not isinstance(ds, str) or not SLOT_RE.match(ds):
         return
     at = at or now()
+    if ds in [k for back in (1, 0) for k, _f in slots(job, at.date() - datetime.timedelta(days=back))]:
+        return                      # a slot's own run is not a Run now
     for back in (1, 0):
-        for k, _f in slots(job, at.date() - datetime.timedelta(days=back)):
+        for k, f in slots(job, at.date() - datetime.timedelta(days=back)):
+            if not os.path.exists(stalled_path(cfg, job["id"], k)):
+                continue
+            if f <= at < f + datetime.timedelta(minutes=window_minutes(job)):
+                try:
+                    open(ran_path(cfg, job["id"], k), "a").close()
+                except OSError:
+                    continue            # keep the stall rather than lose it: the slot would reopen
             try:
                 os.remove(stalled_path(cfg, job["id"], k))
             except OSError:
@@ -1103,6 +1114,46 @@ def prune_markers(cfg, at=None):
                 gone.append(n)
             except OSError:
                 pass
+    gone += prune_slot_files(cfg, cutoff)
+    return gone
+
+
+# a per-slot report: <id>-<date>T<hhmm>[-<run id>][.late].md; a per-slot log: <id>-<date>T<hhmm>-<hhmm>.log. Event reports and logs, date-only
+# keys and chronos.log do not match, so they are never touched.
+_SLOT_REPORT_RE = re.compile(r"^([a-z0-9-]{2,40}?)-(\d{4}-\d{2}-\d{2})(T\d{4})(-r_[0-9A-Za-z]{26})?(\.late)?\.md\Z")
+_SLOT_LOG_RE = re.compile(r"^([a-z0-9-]{2,40}?)-(\d{4}-\d{2}-\d{2})(T\d{4})-\d{4}\.log\Z")
+
+
+def prune_slot_files(cfg, cutoff):
+    """Delete per-slot reports and logs whose date is before `cutoff`, but keep, for every job, the files of its newest slot key (reports and
+    logs separately) however old, so a job that stopped running still has its last result. -> the names removed."""
+    gone = []
+    for key, rx in (("reports_dir", _SLOT_REPORT_RE), ("logs_dir", _SLOT_LOG_RE)):
+        folder = cfg[key]
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            continue
+        found, newest = [], {}
+        for n in names:
+            m = rx.match(n)
+            if not m:
+                continue
+            try:
+                d = datetime.date.fromisoformat(m.group(2))
+            except ValueError:
+                continue
+            k = m.group(2) + m.group(3)
+            found.append((n, m.group(1), d, k))
+            if k > newest.get(m.group(1), ""):
+                newest[m.group(1)] = k
+        for n, jid, d, k in found:
+            if d < cutoff and k != newest[jid]:
+                try:
+                    os.remove(os.path.join(folder, n))
+                    gone.append(n)
+                except OSError:
+                    pass
     return gone
 
 
@@ -1552,7 +1603,6 @@ def start_run(cfg, jid, again=False):
         os.mkdir(cp)
     except FileExistsError:
         raise RunError(409, "This job is already running (claim held).", running=True)
-    clear_stalled_slots(cfg, job)
     try:
         logf = open(os.path.join(cfg["logs_dir"], "chronos.log"), "a")
         logf.write("%s CLAIMED %s -> spawning run (manual)\n" % (time.strftime("%F %T"), jid))
@@ -1601,7 +1651,7 @@ def record_content_hash(record, prompt_bytes, guard_bytes):
     if record.get("triggers"):
         sub["triggers"] = record["triggers"]       # a trigger is a way to start the job: a hand-added one must hold it (a job without any hashes as before)
     if record.get("meta"):
-        sub["meta"] = record["meta"]               # meta can steer what the job does (HB0): an edit holds the job. `times` is left out like `time`: a time edit is low risk
+        sub["meta"] = record["meta"]               # meta can steer what the job does: an edit holds the job. `times` is left out like `time`: a time edit is low risk
     return sha256_ref(canon(sub) + b"\0" + prompt_bytes + b"\0" + guard_bytes)
 
 
@@ -1663,7 +1713,7 @@ def when_obj(job):
     kind, vals = parse_days(job["days"])
     if is_times(job):
         parse_times(job["times"])
-        days = kind if kind in ("daily", "weekdays") else ([DAY_NAMES[v] for v in vals] if kind == "days" else vals)
+        days = kind if kind in ("daily", "weekdays") else [DAY_NAMES[v] for v in vals]
         return {"type": "times", "days": days, "times": list(job["times"])}
     t = job["time"]
     if kind == "daily":
@@ -1702,7 +1752,7 @@ def day_state(cfg, job, d, at=None):
             ds = day_str(parse_once(job["once"]).date())
         except ValueError:
             return "not_due"
-    if os.path.exists(ran_path(cfg, jid, ds)):
+    if os.path.exists(ran_path(cfg, jid, ds)) or prior_form_done(cfg, job, ds):
         return "ran"
     if os.path.exists(failed_path(cfg, jid, ds)):
         return "failed"

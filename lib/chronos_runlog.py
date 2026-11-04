@@ -466,7 +466,7 @@ def claim_run(cfg, jid, req, at=None):
             return {"ok": False, "reason": "window_passed"}      # superseded: a later slot has started and covers this one
         if os.path.exists(cfg["pause_all"]) or C.is_paused(cfg, jid):
             return {"ok": False, "reason": "paused"}
-    ran = os.path.exists(C.ran_path(cfg, jid, ds))
+    ran = os.path.exists(C.ran_path(cfg, jid, ds)) or (not manual and C.prior_form_done(cfg, job, ds))     # a time<->times switch the same day must not run it twice
     if ran and not (manual and again):
         return {"ok": False, "reason": "already_done"}
     if not manual and (os.path.exists(C.failed_path(cfg, jid, ds)) or os.path.exists(C.stalled_path(cfg, jid, ds))):
@@ -480,8 +480,6 @@ def claim_run(cfg, jid, req, at=None):
         os.mkdir(cp)
     except FileExistsError:
         return {"ok": False, "reason": "running_elsewhere"}
-    if manual:
-        C.clear_stalled_slots(cfg, job, at)
     if manual:                                   # under the claim: Run now clears the day's failure, stall and (with `again`) done marker
         for pth in (C.failed_path(cfg, jid, ds), C.stalled_path(cfg, jid, ds)) + ((C.ran_path(cfg, jid, ds),) if again else ()):
             try:
@@ -594,6 +592,9 @@ def finish_run(cfg, jid, req, at=None):
     C.remove_claim(C.claim_path(cfg, jid, ds))
     if ok:
         C.disable_once(cfg, jid)                              # a finished one-shot switches itself off
+        job = next((j for j in C.load_jobs(cfg) if isinstance(j, dict) and j.get("id") == jid), None)
+        if job is not None:
+            C.settle_run_now(cfg, job, ds, at)                # a Run now that worked settles the job's stalled slots
     return {"ok": True}
 
 
@@ -655,7 +656,6 @@ def start_headless(cfg, jid, again=False, at=None):
         os.mkdir(cp)
     except FileExistsError:
         return _refuse("already_running", "this job is already running")
-    C.clear_stalled_slots(cfg, job, at)
     for pth in (C.failed_path(cfg, jid, ds), C.stalled_path(cfg, jid, ds)) + ((C.ran_path(cfg, jid, ds),) if again else ()):
         try:
             os.remove(pth)

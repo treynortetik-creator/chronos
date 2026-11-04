@@ -148,6 +148,10 @@ def main(argv):
             print("one-shot %s disabled in jobs.json" % args[0])
     elif cmd == "notice" and len(args) >= 4:
         C.write_notice(cfg, args[0], args[1], args[2], args[3], args[4] if len(args) > 4 else "ok")
+        if (args[4] if len(args) > 4 else "ok") == "ok":
+            job = next((j for j in C.load_jobs(cfg) if isinstance(j, dict) and j.get("id") == args[0]), None)
+            if job is not None:
+                C.settle_run_now(cfg, job, args[1])        # a successful Run now of a job with `times` settles its stalled slots
     else:
         sys.stderr.write(__doc__)
         return 2

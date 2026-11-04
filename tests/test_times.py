@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""HB0: `times` (several fire times a day for one job) and `meta` (an opaque object on the job record).
+"""`times` (several fire times a day for one job) and `meta` (an opaque object on the job record).
 Every case goes through the real `chronos` / `chronos api` CLI against a throwaway home with a fixed clock (CHRONOS_NOW).
 A job with a plain `time` must behave exactly as before: the last class pins that."""
 import json
@@ -638,6 +638,8 @@ class RunNowClearsAStalledSlot(Base):
         codes = lambda now: [i["code"] for i in api(self.e, ["health"], now=now)[0]["issues"] if i["schedule_id"] == "hb"]
         self.assertIn("launch_stalled", codes(MON + "T10:20"))
         self.claim(RID[0], None, MON + "T10:30", manual=True)
+        self.assertTrue(os.path.exists(self.p("stalled-hb-" + MON + "T0945")))      # not at claim time: it clears once the run has finished OK
+        self.finish(RID[0], MON + "T10:35")
         self.assertFalse(os.path.exists(self.p("stalled-hb-" + MON + "T0945")))
         self.assertNotIn("launch_stalled", codes(MON + "T10:40"))
 
