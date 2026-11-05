@@ -444,7 +444,7 @@ the run script or the UI depends on it, and with the defaults Chronos behaves ex
 
 ```bash
 chronos api version
-# {"api": 1, "chronos": "0.3.1", "session_runner": "hook", "approval_required": false, "features": ["times", "meta"]}
+# {"api": 1, "chronos": "0.4.0", "session_runner": "hook", "approval_required": false, "features": ["times", "meta"]}
 chronos api snapshot                          # every job, its health, its next run
 echo '{"scope": {"id": "daily-digest"}, "paused": true}' | chronos api pause
 ```
