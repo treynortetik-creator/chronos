@@ -116,7 +116,7 @@ class Version(unittest.TestCase):
         e = Env([])
         try:
             out, _ = api(e, ["version"])
-            self.assertEqual(out["chronos"], "0.3.1")
+            self.assertEqual(out["chronos"], "0.4.0")
         finally:
             e.cleanup()
 

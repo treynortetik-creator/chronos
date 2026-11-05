@@ -240,15 +240,17 @@ class Hygiene(unittest.TestCase):
         emails = set(re.findall(r"[\w.+-]+@[\w-]+\.[\w.]+", diff)) - {"noreply@anthropic.com"}
         self.assertEqual(emails, set())
 
-    def test_changelog_unreleased_and_version_still_0_3_1(self):
+    def test_changelog_0_4_0_section_and_version(self):
         e = Env([])
         try:
             out, _ = api(e, ["version"])
-            self.assertEqual(out["chronos"], "0.3.1")
+            self.assertEqual(out["chronos"], "0.4.0")
         finally:
             e.cleanup()
         ch = open(os.path.join(ROOT, "CHANGELOG.md")).read()
         self.assertLess(ch.index("tests/test_no_jobs_file.py"), ch.index("## 0.3.1"))
+        self.assertIn("## 0.4.0 (2026-11-04)", ch)
+        self.assertNotIn("## Unreleased", ch)
 
 
 if __name__ == "__main__":

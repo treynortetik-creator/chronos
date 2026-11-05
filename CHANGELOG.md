@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 (2026-11-04)
+
+**Upgrade note: clients that parse `chronos api` output strictly must accept these before upgrading. Talos does as of its 2026-11-04 main.**
+
+Wire changes a client must tolerate (all additive, `api` stays 1):
+- `when.type` can be `times` (with a `times` list of `"HH:MM"`), besides the existing types.
+- Slot run keys: a `times` job's run key, `last_run` and `runs` entries look like `YYYY-MM-DDTHHMM` (`2026-10-05T0945`), not just a date. They can also appear on a plain job after a `times` to `time` switch.
+- Run now on a `times` job uses an ad-hoc key (the date and the current minute, moved to the next minute when that is a slot's own), in the same `YYYY-MM-DDTHHMM` shape.
+- `meta`: an opaque object on the job record.
+- `date_key` on every schedule in `api snapshot` and `detail.schedule`.
+- `features` (`["times", "meta"]`) on `chronos api version`.
 
 - **`times`: several fire times a day for one job.** `"times": ["09:45", "12:15", "14:45", "17:15"]` (1 to 24 times, ascending, at least 15 minutes apart). Each time is a slot with its own run key `YYYY-MM-DDTHHMM`, so claims, `ran-`/`failed-`/`stalled-` markers, reports and run rows are per slot, a failed slot does not block the next, and the midnight rule applies per slot. A job with a plain `time` is unchanged: same keys, same output, same hashes (the existing goldens are untouched except `version.json`). A slot key is never rewritten to the date key; `_last_run`/`detail.runs`/`report --date` understand slot keys; `session_wait_notify` fires once per date for such a job; `health` reports `missed_recently` only for two missed slots in a row; the tick runs the new `chronos prune`, which deletes slot markers older than 15 days (more than the UI's 14-day strip). Catch-up runs only the newest open slot of a job (older ones read `missed`), one run of a job at a time, Run now on such a job uses a key that is never a slot, is visible as running and refuses to overlap, and clears its stalled slot markers; switching between `time` and `times` the same day does not rerun it; the 15 minute gap is also checked across midnight; `meta` refuses NaN; one bad `times` record no longer takes `api health` or the UI job list down; `config set session_runner hook` is refused while a `times` job runs in a session; the UI can revert a `times` job with `times: null`. **Release order:** the new `features` key and slot keys need a tolerant Talos first (a strict Talos closes the whole scheduler on `features`). The API `when` gains `{"type": "times", "days", "times"}`; `ui/server.py` shows `times` and keeps them on save (a different single `time` is refused, not silently applied); the SessionStart hook skips such a job and the API refuses `runner: session` for it unless `session_runner` is `talos`.
 - **Review fixes for `times` / `meta`.**
@@ -10,7 +20,6 @@
   - Run now on a `times` job no longer clears stalled slot markers when it starts. A Run now that finishes OK settles them: the newest slot that had started when the Run now was claimed, if it stalled and is on the same day and inside its window, counts as run; every other stalled slot is only cleared, and yesterday's is never marked. A Run now is recognised by its owner file (`trigger: run_now`), not by its key. A failed Run now leaves the stall alone.
   - `chronos prune` also deletes per-slot reports (`reports/<id>-<date>T<hhmm>*.md`) and logs (`logs/<id>-<date>T<hhmm>-<hhmm>.log`) older than 15 days, always keeping each job's newest slot report and log.
   - **Clients must accept slot keys on a plain job.** After a `times` to `time` switch, `last_run` and `runs` can carry slot keys (`2026-10-05T0945`) until they age out of the 20-run window and the retention window.
-  - **Version:** this changes the wire (`features`, slot keys, `when` for `times`), so the release commit bumps the version to 0.4.0. It is not bumped in this change.
   - Reads never delete a claim: `due`, `due --dry`, `api due --for session` and `api snapshot` leave a stale-looking claim alone and treat it as live, as on 0.3.1. Only `claim` sweeps a stale claim, and only one of its own key. A claim that records a pid (a headless run) is live only while that pid exists (`os.kill(pid, 0)`; EPERM counts as alive): a crashed run's claim no longer blocks later slots on any path, and any `claim` or Run now removes it. A session claim has no pid and is never swept by a read or another key.
   - **Known limit:** a session claim has no pid, so a session run longer than `stale_claim_min` (45 minutes) can be swept by its own next claim.
   - **Known limit:** after switching `times` back to a single `time`, the job can run twice that day if an earlier slot was missed and a later one ran.
