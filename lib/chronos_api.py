@@ -348,6 +348,21 @@ def report(cfg, args, stdin=None):
     return out
 
 
+def run_result(cfg, args):
+    """One run of a job, looked up by its id (not among the newest few): its fields as the app shows them (status, day, trigger) and its
+    report text or None. For job memory, which takes a background run in once it is over. not_found for an unknown run."""
+    if len(args) != 2 or not C.ID_RE.match(args[0] or "") or not _valid_run_id(args[1]):
+        raise W.WriteError("bad_request", "usage: chronos api run-result <job id> <run id>")
+    row = next((r for r in reversed(RL.run_rows(cfg, args[0])) if r.get("run_id") == args[1]), None)
+    if row is None:
+        raise W.WriteError("not_found", "no such run")
+    try:
+        text = report(cfg, [args[0], "--run", args[1]], "").get("report")
+    except W.WriteError:
+        text = None                      # a run that left no report is still a run
+    return {"run": RL.schedule_run(cfg, row), "report": text}
+
+
 def approved(cfg, jid):
     if not C.ID_RE.match(jid or ""):
         raise W.WriteError("bad_request", "bad job id")
@@ -572,6 +587,15 @@ def dispatch(argv, cfg, stdin, stderr):
         return migrate(cfg, args, stdin, stderr)
     if verb == "report":
         return report(cfg, args, stdin)
+    if verb == "run-result":
+        return run_result(cfg, args)
+    if verb == "memory-binding":
+        if len(args) != 1 or not C.ID_RE.match(args[0] or ""):
+            raise W.WriteError("bad_request", "usage: chronos api memory-binding <job id>")
+        try:
+            return {"sha256": C.memory_binding(cfg, args[0])}
+        except ValueError:
+            raise W.WriteError("not_found", "no such job")
     if verb in RUN_VERBS:
         try:
             return RUN_VERBS[verb](cfg, args, stdin)
