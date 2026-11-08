@@ -12,6 +12,8 @@
   chronos prompt <id> [date]           print the exact prompt a headless run would get
   chronos prompt <id> --event <file> <type>   the prompt of an EVENT run (trusted instructions + the untrusted event block)
   chronos field <id> <name>            print one job field (used by the run script)
+  chronos memory-out <id> <run id>     the file this run was told to write its new notepad to (empty = none)
+  chronos memory-command <id> <run id>  shell assignments for a command job's memory folder (empty = none)
   chronos jobenv <id>                  shell assignments: per-job model and the event run's tool list (used by the run script)
   chronos triggers [--dry]             evaluate event triggers; prints id|hash|eventfile|type for each event to fire
   chronos today                        today's date as Chronos sees it (honours CHRONOS_NOW)
@@ -24,6 +26,7 @@
                                        disable, config set, due --for session, session-beat, approved, migrate); see README "The API"
 """
 import os
+import shlex
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib"))
@@ -114,6 +117,12 @@ def main(argv):
         if C.test_seam("CHRONOS_TEST_BLOCK_FIFO_RUN"):   # tests only, like CHRONOS_TEST_BLOCK_FIFO above: the run script's prompt step blocks in the kernel
             open(C.test_seam("CHRONOS_TEST_BLOCK_FIFO_RUN"), "rb").read()
         sys.stdout.write(C.build_prompt(cfg, args[0], args[1] if len(args) > 1 else None))
+    elif cmd == "memory-out" and len(args) == 2:
+        sys.stdout.write(C.memory_out_for_run(cfg, args[0], args[1]))
+    elif cmd == "memory-command" and len(args) == 2:
+        job = next((j for j in C.load_jobs(cfg) if isinstance(j, dict) and j.get("id") == args[0]), None)
+        env = C.memory_command_env(cfg, job, args[1]) if job else {}
+        print("\n".join("export %s=%s" % (k, shlex.quote(v)) for k, v in env.items()))
     elif cmd == "jobenv" and args:
         try:
             print(C.job_env(cfg, args[0]))

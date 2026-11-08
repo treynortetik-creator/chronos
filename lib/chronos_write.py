@@ -600,7 +600,7 @@ def disable(cfg, jid):
 
 
 # --------------------------------------------------------------------------- config
-CONFIG_KEYS = {"session_runner": ("hook", "talos"), "approval_required": (True, False), "session_wait_notify_min": None}
+CONFIG_KEYS = {"session_runner": ("hook", "talos"), "approval_required": (True, False), "session_wait_notify_min": None, "memory_dir": None}
 
 
 def both_jobs(cfg):
@@ -616,6 +616,11 @@ def set_config(cfg, values):
         if k == "session_wait_notify_min":
             if not _is_int(v) or v < 0:
                 raise WriteError("schedule_invalid", "session_wait_notify_min must be a whole number, 0 or more", [{"path": k, "message": "invalid"}])
+        elif k == "memory_dir":
+            if not isinstance(v, str) or not v.startswith("/") or len(v) > 400 or "\0" in v or "\n" in v or ".." in v.split("/"):
+                raise WriteError("schedule_invalid", "memory_dir must be an absolute folder path", [{"path": k, "message": "invalid"}])
+            if os.path.islink(v) or not os.path.isdir(v):
+                raise WriteError("schedule_invalid", "memory_dir must be a folder that already exists and is not a link", [{"path": k, "message": "invalid"}])
         elif v not in CONFIG_KEYS[k] or (k == "approval_required" and not isinstance(v, bool)):
             raise WriteError("schedule_invalid", "%s must be one of %s" % (k, ", ".join(str(x).lower() for x in CONFIG_KEYS[k])), [{"path": k, "message": "invalid"}])
         clean[k] = v

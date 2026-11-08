@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.0 (2026-11-08)
+
+**Job memory for headless and command runs.** All changes are additive; `api` stays 1, and `features` now lists `memory`.
+- A job can carry a `memory_dir` (an existing, non-link folder set by the client, such as Talos). When it holds a `pack.json` whose binding matches the job's current text (headless) or kind and command (command job), Chronos adds it to the run.
+  - A headless run gets it appended after the task, framed as data with a fresh random marker per run (markers inside the pack are neutralised), plus a per-run path to write a new notepad.
+  - A command run gets a private 0700 scratch folder (`TALOS_MEMORY_DIR`, `TALOS_MEMORY_NOTEPAD_OUT`) holding copies, never the real files.
+  - Restricted runs get past results only. Event-started runs get no memory.
+- `CHRONOS_RUN_ID` is scoped to the prompt step and never reaches the agent or the command.
+- New: `chronos memory-out`, `chronos memory-command`, `chronos api run-result <job> <run>`, `chronos api memory-binding <job>`.
+
 ## 0.4.0 (2026-11-04)
 
 **Upgrade note: clients that parse `chronos api` output strictly must accept these before upgrading. Talos does as of its 2026-11-04 main.**

@@ -86,6 +86,7 @@ if [ -z "$EVENT" ] && { [ -e "$FAILED" ] || [ -e "$CH_STATE/stalled-$id-$D" ]; }
 # v0.3.0: the run id (r_<ULID>; CHRONOS_RUN_ID when `chronos api start` already minted it) and, for a clock run, the claim's owner file
 TRIGGER="${CHRONOS_TRIGGER:-clock}"; [ -n "$EVENT" ] && TRIGGER=event
 RUN_ID="$(chx runlog open --id "$id" --ds "$D" --trigger-kind "$TRIGGER" --pid "$$" ${EVENT:+--hash "$EHASH"})" || RUN_ID=""
+unset CHRONOS_RUN_ID     # `runlog open` took it; the agent or the command this run starts must not inherit it (a run it starts needs its own)
 STATUS="$CH_STATE/run-$id-$D${EVENT:+-$EHASH}.json"
 STARTED="$(date '+%Y-%m-%dT%H:%M:%S%z' | sed -E 's/(..)$/:\1/')"
 write_status() {  # write_status <running|ok|failed|timed_out|launch_stalled>: atomic, refreshed on every watchdog poll
@@ -115,7 +116,15 @@ elif [ -n "$EVENT" ]; then
   [ -f "$EVFILE" ] || fail_early "event file unreadable: $EVFILE"
   PROMPT="$(chx prompt "$id" --event "$EVFILE" "$ETYPE")" || { [ $? -eq 137 ] && stall_early "event prompt"; fail_early "cannot build the event prompt"; }
 else
-  PROMPT="$(chx prompt "$id" "$D")" || { [ $? -eq 137 ] && stall_early "prompt"; fail_early "cannot build prompt"; }
+  PROMPT="$(CHRONOS_RUN_ID="$RUN_ID" chx prompt "$id" "$D")" || { [ $? -eq 137 ] && stall_early "prompt"; fail_early "cannot build prompt"; }
+fi
+# job memory (feature "memory"): the file this run was told to write its new notepad to, if its pack offered one (never an event or a command run)
+if [ "$KIND" != command ] && [ -z "$EVENT" ] && [ -n "$RUN_ID" ]; then
+  MEMOUT="$(chx memory-out "$id" "$RUN_ID" 2>/dev/null)" && [ -n "$MEMOUT" ] && export CHRONOS_MEMORY_OUT="$MEMOUT"
+fi
+# job memory for a command job: a private folder for this run (notepad.txt, results.txt, memory.wrapped.txt) and two variables
+if [ "$KIND" = command ] && [ -z "$EVENT" ] && [ -n "$RUN_ID" ]; then
+  MEMENV="$(chx memory-command "$id" "$RUN_ID" 2>/dev/null)" && [ -n "$MEMENV" ] && eval "$MEMENV"
 fi
 MODE="$(chx field "$id" notify)"
 # per-job settings: CH_JOB_MODEL and, for events, CH_EV_ALLOWED / CH_EV_TOOLS / CH_EV_DENY / CH_EV_MCP.
