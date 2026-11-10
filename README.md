@@ -187,7 +187,7 @@ Two mitigations, both used here:
 1. **Install outside those folders.** If you run `install.sh` from a checkout under Desktop, Documents
    or Downloads, it automatically copies the runtime to `~/.local/share/chronos` and points the plists
    there (re-run it after `git pull` to refresh the copy). `--no-copy` overrides this.
-2. **A bash wrapper.** The UI plist starts `/bin/bash -c "exec python3 server.py"` rather than Python
+2. **A bash wrapper.** The UI plist starts `/bin/bash -c 'exec "$0" "$1"' python3 server.py` rather than Python
    directly. In the author's setup bash was permitted where the system Python was not. If your UI log
    (`~/.chronos/logs/ui.err`) shows `PermissionError`, use `--copy`.
 
@@ -353,6 +353,8 @@ installed, is in [docs/triggers.md](docs/triggers.md).
 ## Config reference
 
 `~/.config/chronos/config.json` (override the path with `CHRONOS_CONFIG`). Every key is optional.
+A config file that exists but cannot be read or parsed stops Chronos (nothing runs, the UI does not start) until it is fixed;
+it never falls back to the defaults.
 
 | Key | Default | Meaning |
 |---|---|---|
