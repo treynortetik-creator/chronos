@@ -1082,7 +1082,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             h = TR.enqueue_webhook(CFG, jid, raw.decode("utf-8", "replace"), self.headers.get("Content-Type") or "", self.client_address[0])
         except TR.TriggerError:
-            raise ApiError(429, "queue full; Chronos fires at most %d runs per job per hour" % CFG["event_rate_per_hour"])
+            raise ApiError(429, "webhook queue full (%d deliveries waiting for this job); Chronos takes them at its next ticks" % TR.QUEUE_CAP)
         self._json(202, {"queued": True, "event": h, "note": "Chronos picks this up at its next 5 minute tick"})
 
     # ---- GET
