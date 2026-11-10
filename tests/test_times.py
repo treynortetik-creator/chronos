@@ -341,7 +341,7 @@ class Features(Base):
 
     def test_api_version_lists_the_features_and_keeps_api_1(self):
         out, _ = api(self.e, ["version"])
-        self.assertEqual(out, {"api": 1, "chronos": C.VERSION, "session_runner": "talos", "approval_required": False, "features": ["times", "meta"]})
+        self.assertEqual(out, {"api": 1, "chronos": C.VERSION, "session_runner": "talos", "approval_required": False, "features": ["times", "meta", "memory"]})
 
 
 class WaitNotifyAndMissed(Base):

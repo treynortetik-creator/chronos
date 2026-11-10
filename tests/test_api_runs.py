@@ -72,7 +72,18 @@ class Claims(Base):
     def test_the_stale_sweep_removes_both_files(self):
         self.claim()
         c = C.load_config()
-        C.sweep_stale_claim(c, C.claim_path(c, "morning", DS), at=C.datetime.datetime(2026, 10, 5, 9, 0))
+        # the claim was written by the CLI in New York time; this in-process sweep must read it in the same zone, whatever the machine's own is
+        prev = os.environ.get("TZ")
+        os.environ["TZ"] = NY
+        C.time.tzset()
+        try:
+            C.sweep_stale_claim(c, C.claim_path(c, "morning", DS), at=C.datetime.datetime(2026, 10, 5, 9, 0))
+        finally:
+            if prev is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = prev
+            C.time.tzset()
         self.assertFalse(os.path.exists(self.p("claim-morning-" + DS)))
         self.assertFalse(os.path.exists(self.p("claim-morning-%s.owner.json" % DS)))
 
