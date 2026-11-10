@@ -109,5 +109,114 @@ class TrailingNewlines(unittest.TestCase):
         self.assertEqual(names, ["claim-plain-" + D], (r.stdout, names))
 
 
+class CliErrors(unittest.TestCase):
+    def test_prompt_for_an_unknown_job_is_one_line_on_stderr_not_a_traceback(self):
+        e = Env([job("alpha")])
+        self.addCleanup(e.cleanup)
+        r = e.run([sys.executable, CLI, "prompt", "no-such-job"])
+        self.assertEqual(r.returncode, 1)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertEqual(r.stdout, "")
+
+
+class WebhookQueueFull(unittest.TestCase):
+    def test_a_full_queue_says_the_queue_is_full_not_the_hourly_rate(self):
+        e = Env([event_job("hooked", [{"type": "webhook"}])])
+        self.addCleanup(e.cleanup)
+        ui = UIServer(e)
+        self.addCleanup(ui.stop)
+        secret = TR.ensure_secret(e.cfg, "hooked")
+        for _ in range(TR.QUEUE_CAP):
+            TR.enqueue_webhook(e.cfg, "hooked", "{}")
+        import http.client
+        c = http.client.HTTPConnection("127.0.0.1", ui.port, timeout=10)
+        c.request("POST", "/hook/hooked", body=b"{}", headers={"Host": "127.0.0.1:%d" % ui.port, "X-Chronos-Secret": secret})
+        r = c.getresponse()
+        body = json.loads(r.read())
+        c.close()
+        self.assertEqual(r.status, 429)
+        self.assertIn("queue", body["error"])
+        self.assertNotIn("per hour", body["error"])
+
+
+class NotifyQuoting(unittest.TestCase):
+    def test_a_message_with_shell_syntax_reaches_the_notify_command_as_one_literal_argument(self):
+        e = Env([job("alpha")])
+        self.addCleanup(e.cleanup)
+        pwned = os.path.join(e.tmp, "pwned")
+        msg = 'a "q" $(touch %s) `touch %s` ; touch %s' % (pwned, pwned, pwned)
+        r = e.run(["/bin/bash", os.path.join(ROOT, "bin", "chronos-notify"), msg])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(e.wait_for(lambda: os.path.exists(e.notify_file), 10))
+        self.assertEqual(open(e.notify_file).read(), msg + "\n")
+        self.assertFalse(os.path.exists(pwned))
+
+    def test_no_notify_command_is_a_silent_no_op(self):
+        e = Env([job("alpha")], notify=False)
+        self.addCleanup(e.cleanup)
+        r = e.run(["/bin/bash", os.path.join(ROOT, "bin", "chronos-notify"), "hello"])
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+
+
+class RunWrapperInputs(unittest.TestCase):
+    """chronos-run.sh builds file names from its arguments; anything outside the allowed shapes must stop it before it touches state."""
+
+    def test_bad_ids_dates_and_hashes_are_refused(self):
+        e = Env([job("alpha")])
+        self.addCleanup(e.cleanup)
+        before = sorted(os.listdir(e.cfg["state_dir"]))
+        for args, want in ((["../x", D], "bad job id"), (["alpha", "2026-10-05/../.."], "bad date"), (["Alpha", D], "bad job id"),
+                           (["alpha", D, "/etc/hosts", "XYZ", "file"], "bad event hash"), (["alpha", D, "/etc/hosts", "abc123", "File"], "bad event type")):
+            r = e.run(["/bin/bash", RUN] + args)
+            self.assertEqual(r.returncode, 1, args)
+            self.assertIn(want, r.stdout, args)
+        self.assertEqual(sorted(os.listdir(e.cfg["state_dir"])), before)
+        self.assertFalse(os.path.exists(e.fake_log))
+
+    def test_a_relaunch_after_success_never_reruns_and_releases_the_claim(self):
+        e = Env([job("alpha")])
+        self.addCleanup(e.cleanup)
+        e.touch(state(e, "ran-alpha-" + D))
+        os.mkdir(state(e, "claim-alpha-" + D))
+        r = e.run(["/bin/bash", RUN, "alpha", D])
+        self.assertIn("SKIP alpha already ran", r.stdout)
+        self.assertFalse(os.path.isdir(state(e, "claim-alpha-" + D)))
+        self.assertFalse(os.path.exists(e.fake_log))
+
+
+class TickGates(unittest.TestCase):
+    def test_dry_run_prints_the_due_job_and_claims_spawns_and_beats_nothing(self):
+        e = Env([job("alpha")])
+        self.addCleanup(e.cleanup)
+        r = e.run(["/bin/bash", TICK], CHRONOS_NOW=D + "T09:30", CHRONOS_DRYRUN="1")
+        self.assertIn("DRYRUN would claim alpha (%s)" % D, r.stdout)
+        self.assertEqual([n for n in os.listdir(e.cfg["state_dir"]) if n.startswith("claim-")], [])
+        self.assertFalse(os.path.exists(os.path.join(e.cfg["home_dir"], "chronos.beat")))
+        time.sleep(1)
+        self.assertFalse(os.path.exists(e.fake_log))
+
+    def test_an_unparseable_jobs_file_logs_a_tick_error_and_exits_0(self):
+        e = Env([job("alpha")])
+        self.addCleanup(e.cleanup)
+        open(e.cfg["jobs_file"], "w").write("[{not json")
+        r = e.run(["/bin/bash", TICK], CHRONOS_NOW=D + "T09:30")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("TICK-ERROR jobs file unreadable", open(os.path.join(e.cfg["logs_dir"], "chronos.log")).read())
+        self.assertEqual([n for n in os.listdir(e.cfg["state_dir"]) if n.startswith("claim-")], [])
+
+    def test_one_invalid_record_does_not_stop_the_others(self):
+        e = Env([job("alpha"), job("bad", notify="sometimes"), job("beta")])
+        self.addCleanup(e.cleanup)
+        r, lines = e.due(D + "T09:30")
+        self.assertEqual(sorted(lines), ["alpha|" + D, "beta|" + D])
+        self.assertIn("skip job 'bad'", r.stderr)
+
+    def test_a_catchup_window_shorter_than_grace_is_refused_by_validation(self):
+        clean, errors = C.validate_schedule({"time": "09:00", "days": "daily", "catchup_min": 5})
+        self.assertTrue(errors)
+        clean, errors = C.validate_schedule({"time": "09:00", "days": "daily", "catchup_min": 1441})
+        self.assertTrue(errors)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
