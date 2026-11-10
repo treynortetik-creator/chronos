@@ -1000,6 +1000,8 @@ class Handler(BaseHTTPRequestHandler):
             n = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             raise ApiError(400, "bad content length")
+        if n < 0:
+            raise ApiError(400, "bad content length")     # rfile.read(-1) would wait for the client to close the socket
         if n > 400_000:
             raise ApiError(413, "request too large")
         raw = self.rfile.read(n) if n else b""
@@ -1067,6 +1069,8 @@ class Handler(BaseHTTPRequestHandler):
             n = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             raise ApiError(400, "bad content length")
+        if n < 0:
+            raise ApiError(400, "bad content length")     # rfile.read(-1) would wait for the client to close the socket
         if n > TR.HOOK_BODY_MAX:
             raise ApiError(413, "body too large (64 KB max)")
         raw = self.rfile.read(n) if n else b""
