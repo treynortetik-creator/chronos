@@ -414,8 +414,8 @@ def snapshot_text(jid, text, label):
     return p
 
 
-HIST_RE = re.compile(r"^(\d{8}-\d{6})(-\d+)?-prompt\.md$")
-JSNAP_RE = re.compile(r"^(\d{8}-\d{6})(-\d+)?\.json$")
+HIST_RE = re.compile(r"^(\d{8}-\d{6})(-\d+)?-prompt\.md\Z")
+JSNAP_RE = re.compile(r"^(\d{8}-\d{6})(-\d+)?\.json\Z")
 SCHEDULE_FIELDS = ("name", "description", "time", "times", "days", "once", "catchup_min", "enabled", "in_session", "notify")
 
 
@@ -841,7 +841,7 @@ def delete_job(jid):
 
 
 # ---- viewing files
-VIEW_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.(log|md|txt)$")
+VIEW_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.(log|md|txt)\Z")
 
 
 def view_file(kind, name):

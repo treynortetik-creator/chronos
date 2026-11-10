@@ -20,8 +20,9 @@ import os
 import re
 import shlex
 import time
+from urllib.parse import urlsplit
 
-NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,40}$")
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,40}\Z")
 SCRIPT_RE = re.compile(r"""[^\s"';|&]+\.(?:py|sh)\b""")
 OFF_RE = re.compile(r"""["'][^"'\n]*?([A-Za-z0-9][A-Za-z0-9_-]{1,40})\.off["']""")
 MAX_CHECKS = 16
@@ -305,8 +306,10 @@ def plugins_and_mcp(root, claude_home):
         t = cfg.get("type") or ("http" if cfg.get("url") else "stdio")
         where = ""
         if cfg.get("url"):
-            m = re.match(r"^\w+://([^/:?#]+)", str(cfg["url"]))
-            where = m.group(1) if m else ""
+            try:
+                where = urlsplit(str(cfg["url"])).hostname or ""      # the host only: never the user:password@ part, the port, path or query
+            except ValueError:
+                where = ""
         elif cfg.get("command"):
             where = os.path.basename(str(cfg["command"]))
         mcp.append({"name": str(name), "transport": str(t), "target": where, "source": source})
