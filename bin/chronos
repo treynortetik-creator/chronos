@@ -2,7 +2,7 @@
 """chronos: small command line for the scheduler. Python 3.9+, standard library only.
 
   chronos env                          shell assignments for the bash scripts
-  chronos due [--dry]                  jobs the tick would start right now (id|date)
+  chronos due                          jobs the tick would start right now (id|date); changes nothing
   chronos list                         every job, its schedule and next fire time
   chronos claim <id> [YYYY-MM-DD[THHMM]] [--unattended]   atomic claim: CLAIMED | ALREADY_DONE | FAILED_TODAY | RUNNING_ELSEWHERE | NOT_DUE
   chronos done <id> [key]              touch the done-marker and release the claim (a job with `times`: the key is its slot, default the current one)
@@ -23,7 +23,8 @@
   chronos disable-once <id>            switch a finished one-shot job off
   chronos notice <id> <date> <log> <report> [status]
   chronos api <verb>                   the JSON interface for other programs (version, snapshot, detail, validate, apply, pause,
-                                       disable, config set, due --for session, session-beat, approved, migrate); see README "The API"
+                                       disable, config set, due --for session, session-beat, approved, migrate, report, run-result,
+                                       memory-binding, claim, finish, orphans, session-prompt, start, health, probe); see README "The API"
 """
 import os
 import shlex

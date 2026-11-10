@@ -46,6 +46,47 @@ claude -p --settings '{"enabledPlugins":{"telegram@claude-plugins-official":fals
 The list is the `disable_plugins` config key. Delivery from Chronos itself is a plain command
 (`notify`, for example `curl` against the Bot API), which never polls and so never conflicts.
 
+## First job in 10 minutes
+
+You need macOS and a Claude Code CLI that is already logged in (run `claude` once by hand).
+
+1. Install. This loads the scheduler and the web UI and creates an empty `~/.config/chronos/jobs.json`:
+
+   ```bash
+   git clone https://github.com/treynortetik-creator/chronos.git
+   cd chronos
+   ./install.sh --workspace ~/code
+   ```
+
+2. Create a job: one entry in `jobs.json` plus its `prompt.md`. Replace the `[]` in `~/.config/chronos/jobs.json` with
+
+   ```json
+   [{"id": "hello", "name": "Hello", "time": "09:00", "days": "daily", "enabled": true, "notify": "failure"}]
+   ```
+
+   and write the prompt:
+
+   ```bash
+   mkdir -p ~/.config/chronos/jobs/hello
+   echo "List the five most recently changed files in this folder and say what each one is." > ~/.config/chronos/jobs/hello/prompt.md
+   ```
+
+   (Or press **New job** in the web UI at <http://127.0.0.1:4747/>, which writes both files for you.)
+
+3. Check it: `bin/chronos list` shows `hello` with its next fire time, and `bin/chronos prompt hello` prints exactly
+   what Claude will receive.
+
+4. Fire it now, without waiting for 09:00: `bin/chronos run hello`. It prints `started hello` and runs headless in
+   the background (in the workspace, `~/code` here). Run it from the folder the installer used as the runtime: this
+   checkout, or `~/.local/share/chronos` if it copied the runtime (the installer says so).
+
+5. See the result. `~/.chronos/logs/chronos.log` gets `START hello` and then `OK hello` (or `FAIL hello`). The report
+   Claude wrote is `~/.chronos/state/reports/hello-<date>.md` and the full run log is
+   `~/.chronos/logs/hello-<date>-<HHMM>.log`. The UI shows both under **Runs**.
+
+From then on launchd runs it every day shortly after 09:00 (the 10 minute grace period plus up to one 5 minute tick).
+A second `chronos run hello` on the same day is refused ("This job already ran today") unless you add `--again`.
+
 ## Features
 
 **Scheduling**
@@ -128,7 +169,7 @@ CHRONOS_CONFIG=$CONFIG python3 $RUNTIME/ui/server.py
 ```
 
 Uninstall: `./uninstall.sh` removes the two agents and keeps your data; `./uninstall.sh --purge` deletes
-`~/.chronos`, `~/.config/chronos` and any copied runtime.
+`~/.chronos`, `~/.config/chronos` and any copied runtime (it asks you to type `purge` first; `--yes` skips that).
 
 The agents are labelled `io.github.chronos.tick` and `io.github.chronos.ui`.
 
@@ -168,9 +209,10 @@ bin/chronos list              # your jobs and their next fire times
    (`chmod 600`) with `TELEGRAM_BOT_TOKEN=...` and `TELEGRAM_CHAT_ID=...`, and point `notify` at it.
    Tokens live only in that file, never in this repo.
 
-Command line: `chronos run <id>`, `chronos claim <id> [--unattended]`, `chronos done <id>`,
+Command line (`bin/chronos --help` lists every command): `chronos list`, `chronos run <id> [--again]`,
+`chronos claim <id> [key] [--unattended]`, `chronos done <id> [key]`, `chronos release <id> [key]`,
 `chronos prompt <id>` (prints exactly what a headless run would receive), `chronos due`,
-`chronos triggers --dry` (what the trigger pass would fire, changing nothing).
+`chronos triggers --dry` (what the trigger pass would fire, changing nothing), `chronos prune`, `chronos --version`.
 
 ## Jobs
 
@@ -203,6 +245,7 @@ A JSON list of objects:
 | `catchup_min` | int 15-1440 | How long after the fire time Chronos may still start it. Default 180. |
 | `enabled` | bool | Only `true` jobs run. |
 | `in_session` | bool | Also arm in an interactive session (needs the optional hook). |
+| `headless` | bool | Optional. `false` makes a session-only job: the tick, the trigger pass and Run now never start it in the background. Leaving it out with `in_session: true` means both (see [The API](#the-api)). |
 | `notify` | `failure` \| `always` \| `never` | When the `notify` command is used for this job. Default `failure`. |
 | `model` | string | Optional per-job `--model`: `opus`, `sonnet`, `haiku` or a full id such as `claude-sonnet-5-5`. Overrides the global `model`. |
 | `kind` | `claude` \| `command` | Default `claude`. `command` runs `command` as a shell command instead of Claude, see [Command jobs](#command-jobs). |
@@ -247,7 +290,7 @@ plain `time` keeps the date as its key, exactly as before.
 - **Release order for Talos.** `chronos api version` now has a `features` key, and a slot `ds` (`2026-10-30T0945`) is not a plain date. A Talos build that
   parses these answers with a strict schema rejects both, and then reports the whole scheduler as unsupported, plain jobs included. Ship the Talos
   tolerance for `features` and slot keys before installing a Chronos that has `times`.
-- The API `when` for it is `{"type": "times", "days": "weekdays", "times": ["09:45", "12:15"]}`. `chronos api version` lists `"features": ["times", "meta"]`
+- The API `when` for it is `{"type": "times", "days": "weekdays", "times": ["09:45", "12:15"]}`. `chronos api version` lists `"features": ["times", "meta", "memory"]`
   so a client can tell whether this install understands them.
 
 A job is **due** when it is enabled, scheduled today, past `time + grace_min`, inside `catchup_min`, not
@@ -275,8 +318,8 @@ itself:
  "time": "06:41", "days": "daily", "catchup_min": 240, "enabled": true, "in_session": false, "notify": "failure"}
 ```
 
-- `command` runs through `/bin/bash -c`, with the workspace as its working directory, `CHRONOS_JOB` and
-  `CHRONOS_RUN=1` in its environment, stdin closed, and the same `PATH` a Claude job gets. At most 2000
+- `command` runs through `/bin/bash -c`, with the workspace as its working directory, `CHRONOS_JOB`,
+  `CHRONOS_LOG`, `CHRONOS_REPORT` and `CHRONOS_RUN=1` in its environment, stdin closed, and the same `PATH` a Claude job gets. At most 2000
   characters, so for anything longer point it at a script.
 - It needs **no `prompt.md`**. It does not start `claude`, spends no tokens and shows as `(command)` on the
   Usage page.
@@ -291,8 +334,8 @@ itself:
 ### Examples
 
 `examples/jobs.json` and `examples/jobs/` contain `daily-summary` (git activity digest),
-`weekly-cleanup` (read-only housekeeping scan with a `guard.md`) and `remind-me-once` (a one-shot). All
-ship disabled.
+`weekly-cleanup` (read-only housekeeping scan with a `guard.md`), `remind-me-once` (a one-shot) and
+`pdf-digest` (an event job with a file trigger). All ship disabled.
 
 ## Events, in one minute
 
@@ -316,7 +359,7 @@ installed, is in [docs/triggers.md](docs/triggers.md).
 | `workspace` | `~/chronos-workspace` | Directory headless runs start in. Point it at your code. |
 | `state_dir` | `~/.chronos/state` | Done-markers, claims, `reports/`, `notices/`. |
 | `logs_dir` | `~/.chronos/logs` | One log per run, plus `chronos.log`. |
-| `home_dir` | `~/.chronos` | `PAUSED`, `paused-jobs/`, heartbeat, `ui-token`, `history/`. |
+| `home_dir` | `~/.chronos` | `PAUSED`, `paused-jobs/`, heartbeat, `ui-token`, `history/`, `runs.jsonl`, `trigger-state/`, `hook-secrets/`, `headless.blocked`. |
 | `jobs_file` | `~/.config/chronos/jobs.json` | The schedule. |
 | `jobs_dir` | `~/.config/chronos/jobs` | `<id>/prompt.md` folders. |
 | `ui_port` | `4747` | Web UI port (127.0.0.1). |
@@ -345,12 +388,27 @@ installed, is in [docs/triggers.md](docs/triggers.md).
 | `agent_files_lint` | `""` | Command run after saving the workspace `CLAUDE.md`; its output is shown. |
 | `session_runner` | `"hook"` | Who runs `in_session` jobs. `"hook"` keeps the optional SessionStart hook arming timers (0.2 behaviour). `"talos"` hands them to an external runner: the hook arms nothing and prints one line. See [The API](#the-api). |
 | `approval_required` | `false` | `true` holds any job whose content differs from its approved record (or has none). Off keeps 0.2 behaviour exactly. |
-| `session_wait_notify_min` | `30` | A session job still waiting this long with no live session notifies once; `0` = off. (Stored now; the notification itself lands in a later 0.3 release candidate.) |
+| `session_wait_notify_min` | `30` | With `session_runner: "talos"`, a session job still waiting this long with no live session notifies once; `0` = off. |
 | `step_deadline_s` | `60` | The tick kills any one of its Python steps with `kill -9`, from outside the process, after this long. |
 | `trigger_deadline_s` | `150` | Same, for the event (trigger) pass. |
+| `launch_timeout_s` | `180` | A headless run with no output and no CPU progress this long after launch is a launch stall (see [Run verbs](#the-api)). |
+| `probe_timeout_s` | `120` | How long `chronos api probe` waits for its one-off launchd job to answer. |
+| `env_pass` | `[]` | Extra environment variable names (or `PREFIX*`) that a run started by Run now, `chronos run` or `chronos api start` keeps. By default it gets only the basics (`HOME`, `PATH`, `LANG`, `TZ`, ...) and `CHRONOS_*`, `ANTHROPIC_*`, `CLAUDE_*`, `LC_*`. |
+| `memory_dir` | `""` | Job memory (feature `memory`): a folder an outside tool fills with `<id>.pack.json`. Empty = off. See [Job memory](#job-memory). |
 
-Timezone is the system timezone; there is no setting. Environment variables for testing:
-`CHRONOS_NOW=2026-10-05T09:00` (fake clock; a value with an offset is converted to the scheduler's zone), `CHRONOS_DRYRUN=1` (tick prints, claims nothing).
+Timezone is the system timezone (`$TZ` if set); there is no setting. Environment variables:
+- `CHRONOS_CONFIG`: the config path (default `~/.config/chronos/config.json`). The launchd plists set it.
+- `CHRONOS_UI_PORT`: overrides `ui_port` (for example a second UI for the demo workspace).
+- `CHRONOS_HOOK_HOSTS`: comma-separated, added to `hook_hosts`.
+- `CHRONOS_GMAIL_COMMAND`, `CHRONOS_GH`: override `gmail_command` and `gh_bin`.
+- `CHRONOS_NOTIFY_ENV` (for `examples/notify/telegram.sh`, default `~/.config/chronos/notify.env`) and
+  `CHRONOS_GMAIL_ENV` (for `examples/gmail/imap-search.py`, default `~/.config/chronos/gmail.env`): the credentials file.
+- For testing: `CHRONOS_NOW=2026-10-05T09:00` (fake clock; a value with an offset is converted to the scheduler's zone),
+  `CHRONOS_DRYRUN=1` (tick prints, claims nothing), `CHRONOS_LAUNCHAGENTS_DIR` (where `install.sh` and `uninstall.sh` put
+  the plists), `CHRONOS_NO_LAUNCHCTL=1` (`uninstall.sh` does not call `launchctl`).
+
+A run itself gets `CHRONOS_RUN=1` (the SessionStart hook stays silent), `CHRONOS_JOB`, `CHRONOS_LOG` and `CHRONOS_REPORT`;
+the `notify` command also gets `CHRONOS_EVENT` (`job_ok`, `job_failed`, `job_stalled`, `session_wait`).
 
 **Permissions note.** Nobody is at the keyboard during a headless run, so `claude -p` cannot ask for
 approval. For **clock runs** the default `--dangerously-skip-permissions` lets the job do anything your
@@ -451,9 +509,9 @@ echo '{"scope": {"id": "daily-digest"}, "paused": true}' | chronos api pause
 
 | Verb | In | Out |
 |---|---|---|
-| `version` | none | `api` (the major; the same major is compatible), `chronos`, `session_runner`, `approval_required`, `features` (`times`, `meta`) |
+| `version` | none | `api` (the major; the same major is compatible), `chronos`, `session_runner`, `approval_required`, `features` (`times`, `meta`, `memory`) |
 | `snapshot` | none | `tz`, `as_of`, `session_runner`, `approval_required`, `paused_all`, `session_beat_age_s`, `tick_age_s`, `schedules[]`. Each schedule has `ds` (the day Chronos is showing: today, or yesterday while yesterday's window is open) and `date_key` (the date its claim and markers are stored under: always equal to `ds` for a recurring job, including after midnight while yesterday's window is open; for a one-shot, the date it was set for, even when that is not today or has passed) |
-| `detail <id>` | none | `schedule`, `prompt` (at most 64 KiB, `prompt_truncated`), `guard`, `next_runs`, `runs` (the 20 most recent, newest first: `run_id`, `ds`, `status`, `runner`, `started_at`, `ended_at`, `duration_s`, `has_report`; a day with only a failed/stalled marker has `run_id: null`) |
+| `detail <id>` | none | `schedule`, `prompt` (at most 64 KiB, `prompt_truncated`), `guard`, `next_runs`, `runs` (the 20 most recent, newest first: `run_id`, `ds`, `status`, `runner`, `trigger`, `started_at`, `ended_at`, `duration_s`, `has_report`; a day with only a failed/stalled marker has `run_id: null`) |
 | `validate` | a change (below) | `ok`, `normalized`, `preview` (`when_text`, `next_runs`, `tz`), `expected_etag`. Never writes |
 | `apply` | `{"change": ..., "expected_etag": ...}` | `{"ok": true, "etag": ...}` |
 | `pause` | `{"scope": "all" \| {"id": ...}, "paused": true\|false}` | the new pause state |
@@ -464,6 +522,8 @@ echo '{"scope": {"id": "daily-digest"}, "paused": true}' | chronos api pause
 | `approved <id>` | none | the approved record, or `null` |
 | `report <id> [--date <date_key>] [--run <run_id>]` | none | read-only: `job_id`, `date_key`, `run_id`, `status`, `runner`, `started_at`, `ended_at`, `report` (at most 256 KiB, `truncated`), `late_note` (whole, with `late_note_truncated: true` if it was cut at the cap) when one exists. The id may instead come as JSON on stdin (`{"id": ..., "date": ..., "run": ...}`), like `detail`. A symlink, or anything whose real path is outside the reports folder, is treated as not stored. A repeated flag is `bad_request`. `--run` picks that run (its date comes from its row); `--date` the latest run of that day; neither, the newest run. Both given must agree. Not found when the job, run or date does not exist or the run has no stored report. Writes nothing |
 | `migrate` | answers on stdin | interactive y/N baseline for a 0.2 install; prompts go to stderr, a JSON summary to stdout |
+| `run-result <id> <run_id>` | none | read-only: `run` (that run's `run_id`, `ds`, `status`, `runner`, `trigger`, `started_at`, `ended_at`, `duration_s`, `has_report`) and `report` (its text, or `null`). `not_found` for an unknown run |
+| `memory-binding <id>` | none | `{"sha256": ...}`: the `prompt_sha256` a memory pack for this job must carry (see [Job memory](#job-memory)) |
 
 **Run verbs** (0.3.0). A run id is `r_` plus a 26-character ULID: the caller mints it for a session run, Chronos for a background run.
 
@@ -517,7 +577,7 @@ re-validates, refuses if the change is not exactly the `normalized` form `valida
 
 **Hashes** (opaque; Chronos computes them): `etag` = sha256 of the job record without `created`/`updated`, the prompt bytes and
 the guard bytes, so it moves on any change; `content_hash` covers only what the job is told to do and how it may act (kind,
-command, restricted, allowed tools, model, `in_session`, `headless`, prompt, guard), so renaming, rescheduling, `notify` and
+command, restricted, allowed tools, model, `in_session`, `headless`, prompt, guard, and `triggers` and `meta` when present), so renaming, rescheduling, `notify` and
 `disable_once` leave it alone; `state_rev` moves on runs, pauses, holds and the session going stale.
 
 ### Approval and `approval_required`
@@ -545,6 +605,16 @@ not a command, not paused, not held, and inside their window, **with no grace pe
 today's **and yesterday's** fire, so a 23:50 job with a 180 minute window is offered at 00:05 with yesterday's `ds`, claimed on
 yesterday's key, and today's 23:50 run is untouched. One-shots are session jobs only when `session_runner` is `"talos"`. With
 `session_runner: "talos"` the SessionStart hook arms no timers, so the two never both run a job.
+
+### Job memory
+
+Added in 0.5.0 (feature `memory`). With `memory_dir` set to an existing folder (not a symlink), an outside tool such as
+Talos can keep a small memory per job in `<memory_dir>/<id>.pack.json` (`{"v": 1, "job", "prompt_sha256", "epoch", "notepad", "text"}`,
+at most 8 KiB). A headless clock run or Run now uses the pack only when `prompt_sha256` matches the job's `prompt.md` on disk (for a command job: its
+kind and command; `chronos api memory-binding <id>` prints the value). The text is appended after the task, framed as data. A run
+leaves a receipt in `<memory_dir>/receipts/`, and when the pack offers a notepad (not for restricted jobs) it is told one file in
+`<memory_dir>/out/` to write the new notepad to (also `CHRONOS_MEMORY_OUT`). A command job instead gets a private scratch folder
+(`TALOS_MEMORY_DIR`, `TALOS_MEMORY_NOTEPAD_OUT`). Event runs get no memory. Chronos never edits a pack and never reads `out/`.
 
 ### Deadlines from outside the process
 
@@ -593,9 +663,10 @@ world, so both are locked down.
   `UNTRUSTED EVENT DATA` block after your trusted instructions, with an explicit rule not to follow it.
 - The child runs `--permission-mode=default` with a narrow `--allowedTools` list (default `Read`, `Grep`,
   `Glob`, plus the notify sender if you set one), `--tools` limited to the built-ins that list needs,
-  `--disallowedTools` for `.env` files, `~/.ssh`, `~/.aws`, `~/.gnupg`, Chronos's own home and config
-  folder and Claude's credentials (deny rules beat allow rules), and `--strict-mcp-config` so no MCP
-  server loads. **It is never given `--dangerously-skip-permissions`, and none of `claude_args`.**
+  `--disallowedTools` for `.env` files, `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config`, Chronos's own home and
+  config folder and Claude's credentials, among others (the full list is under [Restricted jobs](#restricted-jobs); deny rules beat
+  allow rules), `--setting-sources=` so no saved allow rule from a settings file applies, and `--strict-mcp-config`
+  so no MCP server loads (unless the list names an `mcp__` tool). **It is never given `--dangerously-skip-permissions`, and none of `claude_args`.**
 - A rate limit (default 6 runs per job per hour) bounds the damage of a flood. A failed event run is
   reported and not retried.
 - Residual risk, stated plainly: `Read` can read any file that is not on the deny list, and the notify
@@ -621,7 +692,8 @@ loopback-only bind, the webhook secret and throttle, and that no event run ever 
 tests/run.sh
 ```
 
-374 tests (tests/test_chronos.py: the 0.2.2 suite, unchanged; tests/test_api_*.py: the 0.3 API), about two minutes. They cover the tick's due logic with a fake clock (grace, catch-up, days,
+542 tests in the 19 files `tests/run.sh` lists (tests/test_chronos.py: the 0.2.2 suite; tests/test_api_*.py: the 0.3 API;
+then the later review, one-shot report and `times` suites; tests/test_gaps.py: the 2026-11 audit), about four minutes. They cover the tick's due logic with a fake clock (grace, catch-up, days,
 markers, pause, one-shots, a broken `jobs.json`), concurrent claims, the run script against a fake
 `claude` (success, failure, watchdog, one-shot disabling, the plugin-disable flags), the hook, the UI's auth
 and path rules, and for 0.2.0: every trigger type (baselines, settling, rate limit, missing Gmail/`gh`

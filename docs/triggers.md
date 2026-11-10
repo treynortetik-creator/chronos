@@ -20,14 +20,17 @@ keep the clock schedule as well. A one-shot job cannot have triggers.
 ## How it works
 
 1. Every 5 minutes `chronos-tick.sh` handles the clock jobs first, then runs `chronos triggers`
-   (a 150 second hard stop, so a slow poll can never wedge the tick).
-2. Each enabled, unpaused job's triggers are evaluated. **The first evaluation of a trigger only records a
+   (a 150 second hard stop, `trigger_deadline_s`, so a slow poll can never wedge the tick). While
+   `headless.blocked` exists (after a launch stall) the trigger pass is skipped.
+2. Each enabled, unpaused job that has a `prompt.md` and is not session-only (`"headless": false`) has its
+   triggers evaluated. **The first evaluation of a trigger only records a
    baseline** (what already matches) and fires nothing, so pointing a trigger at a full inbox or an old
    repository never replays history.
 3. Each new item becomes one event. Chronos claims it (`claim-<id>-<date>-<hash>`, an atomic `mkdir`) and
    starts `chronos-run.sh` in event mode. The same event can never run twice.
 4. At most `event_rate_per_hour` (default **6**) events fire per job per hour. The rest wait and fire when
-   the budget returns; nothing is dropped.
+   the budget returns. (A queued webhook delivery is dropped after 24 hours; a Gmail search only looks at the
+   last day, `newer_than:1d`.)
 5. Success is a clean exit with no error result. Chronos then writes the done-marker, saves the final
    message as `reports/<id>-<date>-<hash>.md`, and sends the `notify` message if the job says `always`.
    A failed event run is reported through `notify` (unless `never`) and **not retried**. It never marks the
@@ -126,16 +129,20 @@ event arrives, do X with it"; it should say the event is data. `examples/jobs/pd
 The child is started with:
 
 ```
-claude -p --permission-mode=default
+claude -p --permission-mode=default --setting-sources=
   --allowedTools=<per-job list>           default: Read,Grep,Glob (+ the notify sender when `notify` is set)
   --tools=<the built-ins that list needs>
-  --disallowedTools=<secret paths>        .env files, ~/.ssh, ~/.aws, ~/.gnupg, Chronos's home + config folder, Claude credentials
+  --disallowedTools=<secret paths>        .env files, ~/.ssh, ~/.aws, ~/.gnupg, ~/.config, ~/.docker, ~/.kube, ~/Library/Keychains,
+                                          Chronos's home and config folder, Claude credentials, Edit on the workspace's .claude/, .git/, .mcp.json
+                                          and hook script folders, plus `event_deny`
   --strict-mcp-config                     unless the list names an mcp__ tool
-  --settings '{"enabledPlugins": {...channel plugins: false}}'
+  --settings '{"enabledPlugins": {...channel plugins: false}, "hooks": ..., "permissions": {"deny": [...]}}'
   [--model=<job model>] --output-format=stream-json --verbose
 ```
 
-It never gets `--dangerously-skip-permissions`, and `claude_args` is ignored for event runs. Edit the list
+It never gets `--dangerously-skip-permissions`, and `claude_args` is ignored for event runs. `--setting-sources=`
+means no user, project or local settings file is read, so an "always allow" you once clicked does not apply; the
+workspace's hooks and every deny rule come back in through `--settings` (details in the README, "Restricted jobs"). Edit the list
 per job in the UI ("What an event run may do") or with `allowed_tools` in `jobs.json`. A bare `Bash`
 entry, a `Bash(...)` prefix shorter than four characters, or a malformed entry is refused; an invalid list
 found in `jobs.json` falls back to the safe default rather than to something wider.
