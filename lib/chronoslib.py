@@ -54,8 +54,8 @@ FEATURES = ["times", "meta", "memory"]   # `chronos api version` reports these s
 DAY_NAMES = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 DAY_LONG = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 NOTIFY_MODES = ("failure", "always", "never")
-MODEL_RE = re.compile(r"^(opus|sonnet|haiku|claude-[A-Za-z0-9._-]{2,60}(\[1m\])?)$")
-TOOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_\-]{0,80}(\([^,\n]{1,180}\))?$")
+MODEL_RE = re.compile(r"^(opus|sonnet|haiku|claude-[A-Za-z0-9._-]{2,60}(\[1m\])?)\Z")
+TOOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_\-]{0,80}(\([^,\n]{1,180}\))?\Z")
 EVENT_HASH_RE = re.compile(r"^[a-f0-9]{10}\Z")
 JOB_KINDS = ("claude", "command")
 MAX_COMMAND_LEN = 2000
@@ -1076,7 +1076,7 @@ def claim(cfg, jid, unattended=False, at=None, ds=None):
     else:
         if ds and re.match(r"^\d{4}-\d{2}-\d{2}T\d{4}\Z", str(ds)):
             return "NOT_DUE"            # a slot key for a job that has no slots (edited to a plain time since `due` printed it): never the date key's claim
-        ds = ds if (ds and re.match(r"^\d{4}-\d{2}-\d{2}$", ds)) else date_key(job, at)     # the tick passes the ds `due` printed (yesterday's, after midnight)
+        ds = ds if (ds and re.match(r"^\d{4}-\d{2}-\d{2}\Z", ds)) else date_key(job, at)     # the tick passes the ds `due` printed (yesterday's, after midnight)
     os.makedirs(cfg["state_dir"], exist_ok=True)
     cp = claim_path(cfg, jid, ds)
     sweep_stale_claim(cfg, cp, at)
