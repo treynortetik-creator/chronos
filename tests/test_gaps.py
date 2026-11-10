@@ -4,6 +4,8 @@
     python3 tests/test_gaps.py        (also run by tests/run.sh)
 """
 import json
+import shutil
+import tempfile
 import os
 import socket
 import subprocess
@@ -14,7 +16,7 @@ import warnings
 
 warnings.simplefilter("ignore", ResourceWarning)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_chronos import Env, job, event_job, C, CLI, TICK, RUN, FAKE, ROOT  # noqa: E402,F401
+from test_chronos import Env, job, event_job, macos_shims, C, CLI, TICK, RUN, FAKE, ROOT, INSTALL  # noqa: E402,F401
 from api_helpers import api, UIServer, NY  # noqa: E402
 import chronos_triggers as TR  # noqa: E402
 
@@ -216,6 +218,52 @@ class TickGates(unittest.TestCase):
         self.assertTrue(errors)
         clean, errors = C.validate_schedule({"time": "09:00", "days": "daily", "catchup_min": 1441})
         self.assertTrue(errors)
+
+
+class InstallerRerun(unittest.TestCase):
+    def test_a_second_install_keeps_config_jobs_and_token_and_force_config_rewrites_only_the_config(self):
+        home = tempfile.mkdtemp(prefix="chronos-home-")
+        self.addCleanup(shutil.rmtree, home, True)
+        env = dict(os.environ, HOME=home)
+        for k in ("CHRONOS_CONFIG", "CHRONOS_LAUNCHAGENTS_DIR"):
+            env.pop(k, None)
+        env = macos_shims(env, home)
+
+        def install(*extra):
+            r = subprocess.run(["/bin/bash", INSTALL, "--no-load", "--workspace", os.path.join(home, "ws")] + list(extra),
+                               env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            return r.stdout
+        install()
+        cfgp = os.path.join(home, ".config", "chronos", "config.json")
+        jobsp = os.path.join(home, ".config", "chronos", "jobs.json")
+        tokp = os.path.join(home, ".chronos", "ui-token")
+        c = json.load(open(cfgp))
+        c["grace_min"] = 3
+        json.dump(c, open(cfgp, "w"))
+        open(jobsp, "w").write('[{"id": "mine"}]')
+        tok = open(tokp).read()
+        out = install("--port", "4800")
+        self.assertIn("kept existing", out)
+        self.assertEqual(json.load(open(cfgp))["grace_min"], 3)          # a re-run never overwrites your config...
+        self.assertEqual(json.load(open(cfgp))["ui_port"], 4747)         # ...not even the port you pass
+        self.assertEqual(open(jobsp).read(), '[{"id": "mine"}]')
+        self.assertEqual(open(tokp).read(), tok)
+        install("--force-config", "--port", "4800")
+        self.assertEqual(json.load(open(cfgp))["ui_port"], 4800)
+        self.assertEqual(open(jobsp).read(), '[{"id": "mine"}]')         # --force-config is the config only
+        self.assertEqual(open(tokp).read(), tok)
+
+    def test_a_bad_option_or_port_stops_before_writing_anything(self):
+        home = tempfile.mkdtemp(prefix="chronos-home-")
+        self.addCleanup(shutil.rmtree, home, True)
+        env = macos_shims(dict(os.environ, HOME=home), home)
+        env.pop("CHRONOS_CONFIG", None)
+        for args in (["--port", "47x"], ["--nope"]):
+            r = subprocess.run(["/bin/bash", INSTALL, "--no-load"] + args, env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 2, args)
+        self.assertFalse(os.path.exists(os.path.join(home, ".chronos")))
+        self.assertFalse(os.path.exists(os.path.join(home, ".config")))
 
 
 if __name__ == "__main__":
