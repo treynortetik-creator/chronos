@@ -123,17 +123,21 @@ def load_config():
     try:
         with open(p, encoding="utf-8") as fh:
             user = json.load(fh)
-        if isinstance(user, dict):
-            for k, v in user.items():
-                if k in DEFAULTS and not k.startswith("_"):
-                    cfg[k] = v
+        if not isinstance(user, dict):
+            raise ValueError("it is not a JSON object")
+        for k, v in user.items():
+            if k in DEFAULTS and not k.startswith("_"):
+                cfg[k] = v
     except FileNotFoundError:
         if os.environ.get("CHRONOS_CONFIG"):
             # a config that was NAMED but is gone must not silently turn into the defaults (that would point a
             # run at ~/.chronos); only the standard location is allowed to be absent
             raise RuntimeError("config file %s not found (CHRONOS_CONFIG is set)" % p)
-    except Exception as e:  # unreadable config: fall back to defaults, loudly on stderr
-        sys.stderr.write("chronos: could not read %s (%s); using defaults\n" % (p, e))
+    except Exception as e:
+        # A config that EXISTS but cannot be read or parsed must not silently become the defaults: the defaults are the widest
+        # settings there are (claude_args = --dangerously-skip-permissions, approval_required off, no notify, no event_deny), so one
+        # stray comma in a hand edit would undo every restriction the owner had set. Nothing runs until the file is fixed.
+        raise RuntimeError("config file %s cannot be read (%s); fix it, nothing runs until then" % (p, e))
     for k in ("workspace", "state_dir", "logs_dir", "home_dir", "jobs_file", "jobs_dir", "claude_home"):
         cfg[k] = os.path.abspath(os.path.expanduser(str(cfg[k])))
     cfg["memory_dir"] = os.path.abspath(os.path.expanduser(str(cfg["memory_dir"]))) if isinstance(cfg["memory_dir"], str) and cfg["memory_dir"].strip() else ""
