@@ -1876,6 +1876,24 @@ class DemoWorkspace(unittest.TestCase):
                 os.environ["CHRONOS_CONFIG"] = old
 
 
+def macos_shims(env, home):
+    """install.sh is macOS-only (it checks `uname -s` and lints plists with `plutil`). On another OS put stand-ins for those two
+    on PATH so the installer tests still run every other line of it. On a Mac this changes nothing."""
+    if sys.platform == "darwin":
+        return env
+    d = os.path.join(home, "macos-shims")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "uname"), "w") as fh:
+        fh.write('#!/bin/bash\n[ "${1:-}" = "-s" ] && { echo Darwin; exit 0; }\nexec /bin/uname "$@"\n')
+    with open(os.path.join(d, "plutil"), "w") as fh:     # `plutil -lint FILE`: fail on a plist that does not parse
+        fh.write('#!/bin/bash\nexec "%s" -c \'import plistlib,sys; plistlib.load(open(sys.argv[1],"rb"))\' "${@: -1}"\n' % sys.executable)
+    for n in ("uname", "plutil"):
+        os.chmod(os.path.join(d, n), 0o755)
+    env = dict(env)
+    env["PATH"] = d + ":" + env.get("PATH", "")
+    return env
+
+
 class Installer(unittest.TestCase):
     """install.sh into a throwaway HOME with --no-load: nothing may reach the real LaunchAgents folder or launchctl."""
 
@@ -1892,6 +1910,7 @@ class Installer(unittest.TestCase):
         env = dict(os.environ, HOME=home, PATH=bindir + ":" + os.environ["PATH"])
         env.pop("CHRONOS_CONFIG", None)
         env.pop("CHRONOS_LAUNCHAGENTS_DIR", None)
+        env = macos_shims(env, home)
         ws = os.path.join(home, "ws")
         r = subprocess.run(["/bin/bash", INSTALL, "--no-load", "--workspace", ws, "--port", "4799", "--with-examples"], env=env, capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -1926,6 +1945,7 @@ class Installer(unittest.TestCase):
         env = dict(os.environ, HOME=home)
         for k in ("CHRONOS_CONFIG", "CHRONOS_LAUNCHAGENTS_DIR"):
             env.pop(k, None)
+        env = macos_shims(env, home)
         r = subprocess.run(["/bin/bash", INSTALL, "--workspace", os.path.join(home, "ws"), "--port", "4798"] + list(args), env=env, capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         return home, r.stdout
@@ -1971,6 +1991,7 @@ class Installer(unittest.TestCase):
         self.addCleanup(shutil.rmtree, home, True)
         env = dict(os.environ, HOME=home)
         env.pop("CHRONOS_CONFIG", None)
+        env = macos_shims(env, home)
         r = subprocess.run(["/bin/bash", INSTALL, "--no-load", "--copy", "--no-ui", "--workspace", os.path.join(home, "ws")], env=env, capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         base = os.path.join(home, ".local", "share", "chronos")

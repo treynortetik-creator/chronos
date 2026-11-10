@@ -71,6 +71,11 @@ class Claims(Base):
 
     def test_the_stale_sweep_removes_both_files(self):
         self.claim()
+        # `at` is a naive local time; the claim was written under America/New_York, so read it in that zone here too
+        old_tz = os.environ.get("TZ")
+        os.environ["TZ"] = NY
+        C.time.tzset()
+        self.addCleanup(lambda: (os.environ.pop("TZ", None) if old_tz is None else os.environ.__setitem__("TZ", old_tz), C.time.tzset()))
         c = C.load_config()
         C.sweep_stale_claim(c, C.claim_path(c, "morning", DS), at=C.datetime.datetime(2026, 10, 5, 9, 0))
         self.assertFalse(os.path.exists(self.p("claim-morning-" + DS)))
