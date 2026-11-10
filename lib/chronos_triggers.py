@@ -47,6 +47,7 @@ import chronoslib as C
 
 MAX_PAYLOAD = 4000
 SETTLE_S = 30
+MAX_FILES = 5000                   # most files one file trigger remembers; a folder with more is refused, never half-remembered
 QUEUE_CAP = 20
 QUEUE_MAX_AGE_S = 24 * 3600
 HOOK_BODY_MAX = 64 * 1024
@@ -54,7 +55,7 @@ DEFAULT_INTERVAL_MIN = {"gmail": 10, "github": 10}
 TYPES = ("file", "gmail", "github", "webhook")
 GITHUB_EVENTS = ("pr", "issue", "release")
 ID_RE = C.ID_RE
-REPO_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
+REPO_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}\Z")
 GLOB_RE = re.compile(r"^[\w.*?\[\]!\- ,+@#%()]{1,80}$")
 MARKER_WORD = "UNTRUSTED EVENT DATA"
 CHRONOS_TAG = "[chronos]"          # mail whose subject carries this tag never fires a trigger (so Chronos-sent mail cannot loop)
@@ -320,9 +321,12 @@ def eval_file(cfg, t, ts, now):
             settling += 1
             continue
         cur[p] = [int(st.st_mtime), st.st_size]
+    if len(cur) > MAX_FILES:
+        # remembering only the first MAX_FILES would make every file past the cap look new on every check and replay old files as events
+        raise TriggerError("%d files match in this folder and a file trigger follows at most %d; narrow the pattern or watch a smaller folder" % (len(cur), MAX_FILES))
     if old is None:
         ts2 = dict(ts)
-        ts2["files"] = dict(list(cur.items())[:5000])
+        ts2["files"] = dict(list(cur.items())[:MAX_FILES])
         return [], ts2, {"baseline": True, "count": len(cur), "settling": settling}
     events, base = [], {}
     for p, v in cur.items():
@@ -338,7 +342,7 @@ def eval_file(cfg, t, ts, now):
         else:
             base[p] = v
     ts2 = dict(ts)
-    ts2["files"] = dict(list(base.items())[:5000])
+    ts2["files"] = dict(list(base.items())[:MAX_FILES])
     return events, ts2, {"baseline": False, "count": len(cur), "settling": settling}
 
 

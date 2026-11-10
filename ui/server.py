@@ -414,8 +414,8 @@ def snapshot_text(jid, text, label):
     return p
 
 
-HIST_RE = re.compile(r"^(\d{8}-\d{6})(-\d+)?-prompt\.md$")
-JSNAP_RE = re.compile(r"^(\d{8}-\d{6})(-\d+)?\.json$")
+HIST_RE = re.compile(r"^(\d{8}-\d{6})(-\d+)?-prompt\.md\Z")
+JSNAP_RE = re.compile(r"^(\d{8}-\d{6})(-\d+)?\.json\Z")
 SCHEDULE_FIELDS = ("name", "description", "time", "times", "days", "once", "catchup_min", "enabled", "in_session", "notify")
 
 
@@ -841,7 +841,7 @@ def delete_job(jid):
 
 
 # ---- viewing files
-VIEW_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.(log|md|txt)$")
+VIEW_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.(log|md|txt)\Z")
 
 
 def view_file(kind, name):
@@ -1000,6 +1000,8 @@ class Handler(BaseHTTPRequestHandler):
             n = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             raise ApiError(400, "bad content length")
+        if n < 0:
+            raise ApiError(400, "bad content length")           # read(-1) would read until the client hangs up, with no limit
         if n > 400_000:
             raise ApiError(413, "request too large")
         raw = self.rfile.read(n) if n else b""
@@ -1066,6 +1068,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except ValueError:
+            raise ApiError(400, "bad content length")
+        if n < 0:
             raise ApiError(400, "bad content length")
         if n > TR.HOOK_BODY_MAX:
             raise ApiError(413, "body too large (64 KB max)")

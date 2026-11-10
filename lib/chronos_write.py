@@ -639,11 +639,15 @@ def set_config(cfg, values):
                 raise WriteError("schedule_invalid", "these jobs have several times a day and run in the live session, which only the talos runner can do; change each one first: " + ", ".join(stuck),
                                  [{"path": b, "message": "times job in a session"} for b in stuck])
         try:
-            cur = json.load(open(path, encoding="utf-8"))
-            if not isinstance(cur, dict):
-                cur = {}
-        except (OSError, ValueError):
+            with open(path, encoding="utf-8") as fh:
+                cur = json.load(fh)
+        except FileNotFoundError:
             cur = {}
+        except (OSError, ValueError) as e:
+            # never replace a config we could not read with one that holds only these keys (the rest of it would be gone)
+            raise WriteError("bad_request", "config file %s cannot be read (%s); fix it by hand first, nothing was written" % (path, e))
+        if not isinstance(cur, dict):
+            raise WriteError("bad_request", "config file %s is not a JSON object; fix it by hand first, nothing was written" % path)
         cur.update(clean)
         atomic_write(path, json.dumps(cur, indent=2, ensure_ascii=False) + "\n")
     return clean

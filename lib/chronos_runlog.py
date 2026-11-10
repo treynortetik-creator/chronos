@@ -285,8 +285,8 @@ def summarize(cfg, rows, now=None, days=14):
 # =========================================================================== v0.3.0: runs (claim, finish, orphans, start, session-prompt, health, probe)
 # Everything below is the Chronos side of "who is running what": run ids, the claim's sibling owner file, per-run reports, the
 # launch-stall block, and the signals `health` reports. The api verbs in chronos_api.py are thin wrappers over these functions.
-RUN_ID_RE = re.compile(r"^r_[0-9A-HJKMNP-TV-Z]{26}$")
-DS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+RUN_ID_RE = re.compile(r"^r_[0-9A-HJKMNP-TV-Z]{26}\Z")
+DS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
 FINISH_STATUSES = ("ok", "failed", "timed_out", "session_ended")
 MAX_REPORT_BYTES = 256 * 1024
 PROTECTED_DIRS = ("Desktop", "Documents", "Downloads", "Library/Mobile Documents", "Library/CloudStorage")

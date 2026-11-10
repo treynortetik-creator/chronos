@@ -9,7 +9,9 @@
   <array>
     <string>/bin/bash</string>
     <string>-c</string>
-    <string>exec __PYTHON__ __INSTALL_DIR__/ui/server.py</string>
+    <string>exec "$0" "$1"</string>
+    <string>__PYTHON__</string>
+    <string>__INSTALL_DIR__/ui/server.py</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>

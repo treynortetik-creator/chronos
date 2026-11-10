@@ -54,8 +54,8 @@ FEATURES = ["times", "meta", "memory"]   # `chronos api version` reports these s
 DAY_NAMES = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 DAY_LONG = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 NOTIFY_MODES = ("failure", "always", "never")
-MODEL_RE = re.compile(r"^(opus|sonnet|haiku|claude-[A-Za-z0-9._-]{2,60}(\[1m\])?)$")
-TOOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_\-]{0,80}(\([^,\n]{1,180}\))?$")
+MODEL_RE = re.compile(r"^(opus|sonnet|haiku|claude-[A-Za-z0-9._-]{2,60}(\[1m\])?)\Z")
+TOOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_\-]{0,80}(\([^,\n]{1,180}\))?\Z")
 EVENT_HASH_RE = re.compile(r"^[a-f0-9]{10}\Z")
 JOB_KINDS = ("claude", "command")
 MAX_COMMAND_LEN = 2000
@@ -1062,6 +1062,8 @@ def claim(cfg, jid, unattended=False, at=None, ds=None):
         return "NO_SUCH_JOB"
     if unattended and not job_is_due_today(job, at):
         return "NOT_DUE"
+    if unattended and (os.path.exists(cfg["pause_all"]) or is_paused(cfg, jid)):
+        return "NOT_DUE"            # a timer firing in a live session honours the pause switches, like the tick and `api claim` do
     if is_held(cfg, job):
         return "HELD"
     if is_times(job) and not job.get("once"):
@@ -1076,7 +1078,7 @@ def claim(cfg, jid, unattended=False, at=None, ds=None):
     else:
         if ds and re.match(r"^\d{4}-\d{2}-\d{2}T\d{4}\Z", str(ds)):
             return "NOT_DUE"            # a slot key for a job that has no slots (edited to a plain time since `due` printed it): never the date key's claim
-        ds = ds if (ds and re.match(r"^\d{4}-\d{2}-\d{2}$", ds)) else date_key(job, at)     # the tick passes the ds `due` printed (yesterday's, after midnight)
+        ds = ds if (ds and DATE_RE.match(ds)) else date_key(job, at)     # the tick passes the ds `due` printed (yesterday's, after midnight)
     os.makedirs(cfg["state_dir"], exist_ok=True)
     cp = claim_path(cfg, jid, ds)
     sweep_stale_claim(cfg, cp, at)
@@ -1243,7 +1245,7 @@ def claim_event(cfg, jid, ehash, at=None):
 
 def event_claims(cfg, jid, ds):
     """Names of claim dirs held right now by event runs of this job on this date."""
-    pat = re.compile(r"^claim-%s-%s-[a-f0-9]{10}$" % (re.escape(jid), re.escape(ds)))
+    pat = re.compile(r"^claim-%s-%s-[a-f0-9]{10}\Z" % (re.escape(jid), re.escape(ds)))
     try:
         return sorted(n for n in os.listdir(cfg["state_dir"]) if pat.match(n))
     except OSError:
@@ -1251,7 +1253,7 @@ def event_claims(cfg, jid, ds):
 
 
 def event_ran(cfg, jid, ds):
-    pat = re.compile(r"^ran-%s-%s-[a-f0-9]{10}$" % (re.escape(jid), re.escape(ds)))
+    pat = re.compile(r"^ran-%s-%s-[a-f0-9]{10}\Z" % (re.escape(jid), re.escape(ds)))
     try:
         return sorted(n for n in os.listdir(cfg["state_dir"]) if pat.match(n))
     except OSError:
@@ -1813,15 +1815,8 @@ def start_run(cfg, jid, again=False):
     run_script = os.path.join(ROOT_DIR, "bin", "chronos-run.sh")
     ds = run_now_key(job, now())
     ran = ran_path(cfg, jid, ds)
-    if os.path.exists(ran):
-        if not again:
-            raise RunError(409, "This job already ran today. Run it again?", need_confirm=True)
-        os.remove(ran)
-    for marker in (failed_path(cfg, jid, ds), stalled_path(cfg, jid, ds)):
-        try:
-            os.remove(marker)
-        except FileNotFoundError:
-            pass
+    if os.path.exists(ran) and not again:
+        raise RunError(409, "This job already ran today. Run it again?", need_confirm=True)
     os.makedirs(cfg["state_dir"], exist_ok=True)
     os.makedirs(cfg["logs_dir"], exist_ok=True)
     cp = claim_path(cfg, jid, ds)
@@ -1833,6 +1828,13 @@ def start_run(cfg, jid, again=False):
         os.mkdir(cp)
     except FileExistsError:
         raise RunError(409, "This job is already running (claim held).", running=True)
+    # Only UNDER the claim (as `chronos api claim` and `start` do): a Run now that is refused because a run still holds the claim must not
+    # have deleted that run's done or failed marker, or the tick would run the day a second time.
+    for marker in (failed_path(cfg, jid, ds), stalled_path(cfg, jid, ds)) + ((ran,) if again else ()):
+        try:
+            os.remove(marker)
+        except FileNotFoundError:
+            pass
     try:
         logf = open(os.path.join(cfg["logs_dir"], "chronos.log"), "a")
         logf.write("%s CLAIMED %s -> spawning run (manual)\n" % (time.strftime("%F %T"), jid))

@@ -30,9 +30,9 @@ import control_room as CR
 
 MAX_EDIT = 300_000          # bytes; bigger files are view-only (the request body cap is 400 KB)
 MAX_VIEW = 1_500_000
-ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,100}$")
-HIST_RE = re.compile(r"^(\d{8}-\d{6})(-\d+)?\.md$")
-SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,100}\Z")
+HIST_RE = re.compile(r"^(\d{8}-\d{6})(-\d+)?\.md\Z")
+SHA_RE = re.compile(r"^[0-9a-f]{64}\Z")
 AGENT_WARN = "An agent, hook or scheduled job may also edit this file automatically. Keep edits small and save quickly."
 
 BUILTIN_CATS = [("core", "Core instructions"), ("agents", "Agents"), ("skills", "Skills")]
@@ -83,7 +83,7 @@ def _glob_re(pat):
             continue
         out += "[^/]*" if c == "*" else ("[^/]" if c == "?" else re.escape(c))
         i += 1
-    return re.compile("^" + out + "$")
+    return re.compile("^" + out + "$", re.I)      # case-insensitive, like the macOS file system: excluding "private" must hide Private/ too
 
 
 def excluded(cfg, rp):
@@ -106,7 +106,7 @@ def allowed(cfg, path):
         if excluded(cfg, rp):
             return None
         for part in rp.split(os.sep):
-            if part.startswith(".env"):
+            if part.lower().startswith(".env"):
                 return None
         base = os.path.basename(rp).lower()
         if not base.endswith(".md") or (base.startswith("settings") and base.endswith(".json")):

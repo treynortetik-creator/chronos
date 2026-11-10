@@ -17,6 +17,7 @@
 # No jobs.json yet is an empty registry (nothing due). If jobs.json cannot be read or parsed, or its directory is missing,
 # the tick logs the error and does nothing (never crash-loops).
 set -u
+umask 077     # state, logs and event files are private to the owner even on an install that install.sh did not prepare
 DIR="$(cd "$(dirname "$0")" && pwd)"
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 PYBIN="$(command -v python3 || echo /usr/bin/python3)"
@@ -73,7 +74,10 @@ elif [ -e "$CH_HOME/headless.blocked" ]; then
   # headless.blocked: no headless Claude runs (an event run is one) until Retry clears it. Command jobs are clock jobs and already ran above.
   echo "$(date '+%F %T') TRIGGERS skipped: headless runs are blocked (see headless.blocked)" >> "$CH_LOGS/chronos.log"
 else
-  HITS=$(ch_step "$CH_TRIGGER_DEADLINE_S" triggers "$PYBIN" "$DIR/chronos" triggers 2>>"$CH_LOGS/chronos.log") || HITS=""
+  # Whatever the pass printed is kept even when it ends badly (killed at its deadline, rc 137). Every printed line is an event the pass has
+  # already marked as seen (state saved, webhook queue file deleted), so dropping the output would lose those events for good. Each line is
+  # written whole and is checked again below (id, hash, claim-event, the event file).
+  HITS=$(ch_step "$CH_TRIGGER_DEADLINE_S" triggers "$PYBIN" "$DIR/chronos" triggers 2>>"$CH_LOGS/chronos.log")
   while IFS='|' read -r tid thash tfile ttype; do
     [ -n "$tid" ] && [ -n "$thash" ] || continue
     case "$thash" in *[!a-f0-9]*) continue ;; esac
