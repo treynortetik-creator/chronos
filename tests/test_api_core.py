@@ -19,7 +19,7 @@ class VersionAndShape(unittest.TestCase):
 
     def test_version_reports_api_runner_and_approval_default(self):
         out, _ = api(self.e, ["version"])
-        self.assertEqual(out, {"api": 1, "chronos": "0.5.0", "session_runner": "hook", "approval_required": False, "features": ["times", "meta", "memory"]})
+        self.assertEqual(out, {"api": 1, "chronos": "0.5.1", "session_runner": "hook", "approval_required": False, "features": ["times", "meta", "memory"]})
 
     def test_unknown_verb_is_a_json_error_with_exit_1(self):
         _, r = api(self.e, ["nonsense"], expect=1)

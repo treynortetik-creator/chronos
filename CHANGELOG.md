@@ -1,6 +1,6 @@
 # Changelog
 
-## After 0.5.0, not yet released (2026-11-10)
+## 0.5.1 (2026-11-10)
 
 **Security and correctness audit, 2026-11-10** ([docs/audits/2026-11-10-security.md](docs/audits/2026-11-10-security.md)). Fixes only; `api` stays 1.
 - **Behaviour change:** a `config.json` that exists but cannot be read or parsed now stops Chronos (the tick starts nothing, the UI does not start) instead of

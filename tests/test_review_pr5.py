@@ -244,7 +244,7 @@ class Hygiene(unittest.TestCase):
         e = Env([])
         try:
             out, _ = api(e, ["version"])
-            self.assertEqual(out["chronos"], "0.5.0")
+            self.assertEqual(out["chronos"], "0.5.1")
         finally:
             e.cleanup()
         ch = open(os.path.join(ROOT, "CHANGELOG.md")).read()

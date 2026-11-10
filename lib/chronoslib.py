@@ -37,7 +37,7 @@ import stat
 import sys
 import time
 
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 API_VERSION = 1                      # `chronos api version` -> {"api": 1, ...}; the same major means compatible
 CHRONOS_API_VERSION = VERSION        # what `chronos api version` reports as "chronos"
 SESSION_RUNNERS = ("hook", "talos")
