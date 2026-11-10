@@ -1,5 +1,19 @@
 # Changelog
 
+## After 0.5.0, not yet released (2026-11-10)
+
+**Security and correctness audit, 2026-11-10** ([docs/audits/2026-11-10-security.md](docs/audits/2026-11-10-security.md)). Fixes only; `api` stays 1.
+- **Behaviour change:** a `config.json` that exists but cannot be read or parsed now stops Chronos (the tick starts nothing, the UI does not start) instead of
+  quietly running on the defaults, which are the widest settings (`--dangerously-skip-permissions`, `approval_required` off, no `notify`). `chronos api config set` refuses to rewrite such a file.
+- The tick keeps the events a trigger pass had already announced when the pass is killed at its deadline (they used to be lost).
+- Run now (CLI and web UI) clears the day's done / failed markers only once it holds the claim, so a refused Run now can no longer cause a second run.
+- `chronos claim <id> --unattended` answers `NOT_DUE` for a paused job and under Pause all: in-session timers now honour the pause switches.
+- A file trigger on a folder with more than 5,000 matching files reports an error instead of replaying old files.
+- The tick runs with `umask 077`. Run keys, model names, tool entries and file names no longer accept a trailing newline.
+- Web UI: `/api/control` shows an MCP server's host only (never credentials in its URL), `agent_files_exclude` ignores case, a negative `Content-Length` is refused.
+- The UI launchd agent passes its paths as arguments, so a checkout in a folder with a space (or shell characters) in its name starts correctly. Re-run `install.sh` to pick this up.
+- Still open, see the report: the web UI gives its token to any local client (B-01), and a live session run longer than `stale_claim_min` gets a background duplicate (B-02).
+
 ## 0.5.0 (2026-11-08)
 
 **Job memory for headless and command runs.** All changes are additive; `api` stays 1, and `features` now lists `memory`.
