@@ -191,7 +191,11 @@ while kill -0 "$pid" 2>/dev/null; do
     kill -TERM $kids "$pid" 2>/dev/null; sleep 1; kill -KILL $kids "$pid" 2>/dev/null; break
   fi
   if [ "$waited" -ge "$CH_TIMEOUT_S" ]; then
-    timed_out=1; pkill -TERM -P "$pid" 2>/dev/null; kill -TERM "$pid" 2>/dev/null; break
+    timed_out=1; pkill -TERM -P "$pid" 2>/dev/null; kill -TERM "$pid" 2>/dev/null
+    # a child that ignores TERM would make the `wait` below block and hold the claim: after 10 s, kill -9 its whole tree
+    g=0; while kill -0 "$pid" 2>/dev/null && [ "$g" -lt 10 ]; do sleep 1; g=$((g + 1)); done
+    if kill -0 "$pid" 2>/dev/null; then kids="$(ch_tree "$pid" | tr '\n' ' ')"; kill -KILL $kids "$pid" 2>/dev/null; fi
+    break
   fi
 done
 if [ -n "$stalled" ]; then rc=137; else wait "$pid" 2>/dev/null; rc=$?; fi     # (never `wait` for a child killed mid-stall: it may not die)
