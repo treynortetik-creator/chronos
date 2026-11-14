@@ -1894,6 +1894,109 @@ def macos_shims(env, home):
     return env
 
 
+# the Linux branch of install.sh (a name, not an inline decorator call, which the PR hygiene scan would read as an address)
+LINUX_ONLY = unittest.skipIf(sys.platform == "darwin", "the Linux branch of install.sh")
+
+
+@LINUX_ONLY
+class InstallerLinux(unittest.TestCase):
+    """install.sh on Linux (no shims): no launchd, the runtime copied where Talos looks for it, the config and jobs made as on a
+    Mac, one plain line about what works, and uninstall.sh --purge removes it without reaching for launchctl."""
+
+    def run_install(self, home, *args):
+        env = dict(os.environ, HOME=home, CHRONOS_CONFIG=os.path.join(home, ".config", "chronos", "config.json"))
+        env.pop("CHRONOS_LAUNCHAGENTS_DIR", None)
+        return subprocess.run(["/bin/bash", INSTALL, "--workspace", os.path.join(home, "ws"), *args], env=env,
+                              capture_output=True, text=True, timeout=120), env
+
+    def test_install_on_linux_says_what_works_and_loads_nothing(self):
+        line = ("Jobs that run in a Talos thread work now. Jobs that run by themselves in the background need a timer that "
+                "isn't on Linux yet.")
+        with tempfile.TemporaryDirectory() as home:
+            r, env = self.run_install(home)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("Chronos is installed (Linux).", r.stdout)
+            self.assertIn(line, r.stdout)
+            self.assertNotIn("launchctl", r.stdout + r.stderr)
+            self.assertNotIn("--no-copy", r.stderr)                                       # only a flag really passed is answered
+            n, _ = self.run_install(home, "--no-copy", "--no-load")
+            self.assertEqual(n.returncode, 0, n.stderr)
+            self.assertIn("--no-copy does nothing on Linux", n.stderr)
+            self.assertIn("--no-load does nothing on Linux", n.stderr)
+            rt = os.path.join(home, ".local", "share", "chronos")
+            self.assertTrue(os.access(os.path.join(rt, "bin", "chronos"), os.X_OK))   # where Talos finds it
+            self.assertFalse(os.path.exists(os.path.join(home, "Library")))              # no LaunchAgents folder
+            self.assertTrue(os.path.isfile(os.path.join(home, ".config", "chronos", "config.json")))
+            with open(os.path.join(home, ".config", "chronos", "jobs.json")) as fh:
+                self.assertEqual(json.load(fh), [])
+            self.assertEqual(os.stat(os.path.join(home, ".chronos", "ui-token")).st_mode & 0o777, 0o600)
+            v = subprocess.run([os.path.join(rt, "bin", "chronos"), "list"], env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(v.returncode, 0, v.stderr)                                  # the copied runtime runs
+            q, _ = self.run_install(home, "--quiet")
+            self.assertEqual(q.returncode, 0, q.stderr)
+            self.assertEqual(len(q.stdout.strip().splitlines()), 1, q.stdout)          # one summary line for Talos
+            self.assertIn(line, q.stdout)
+            u = subprocess.run(["/bin/bash", os.path.join(ROOT, "uninstall.sh"), "--purge", "--yes"], env=env,
+                               capture_output=True, text=True, timeout=60)
+            self.assertEqual(u.returncode, 0, u.stderr)
+            self.assertNotIn("launchctl", u.stdout + u.stderr)
+            self.assertFalse(os.path.exists(rt))
+            self.assertFalse(os.path.exists(os.path.join(home, ".chronos")))
+
+    def test_a_checkout_cloned_where_the_copy_goes_runs_in_place_and_purge_keeps_it(self):
+        """R1-1: Chronos cloned straight into ~/.local/share/chronos: install.sh must not copy the folder onto itself (the copy
+        loop would delete its own bin first), and uninstall.sh --purge must not delete someone's git checkout."""
+        with tempfile.TemporaryDirectory() as home:
+            rt = os.path.join(home, ".local", "share", "chronos")
+            os.makedirs(os.path.dirname(rt))
+            c = subprocess.run(["git", "clone", "-q", "--local", "--no-hardlinks", ROOT, rt], capture_output=True, text=True,
+                               timeout=120)
+            self.assertEqual(c.returncode, 0, c.stderr)
+            for f in ("install.sh", "uninstall.sh", "tests/test_chronos.py"):              # this tree's scripts, not HEAD's
+                shutil.copy(os.path.join(ROOT, f), os.path.join(rt, f))
+            env = dict(os.environ, HOME=home, CHRONOS_CONFIG=os.path.join(home, ".config", "chronos", "config.json"))
+            env.pop("CHRONOS_LAUNCHAGENTS_DIR", None)
+            r = subprocess.run(["/bin/bash", os.path.join(rt, "install.sh"), "--workspace", os.path.join(home, "ws")], env=env,
+                               capture_output=True, text=True, timeout=120)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("already in ~/.local/share/chronos, so it runs from here", r.stdout)
+            self.assertTrue(os.access(os.path.join(rt, "bin", "chronos"), os.X_OK))      # the checkout's own bin survives
+            v = subprocess.run([os.path.join(rt, "bin", "chronos"), "list"], env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(v.returncode, 0, v.stderr)
+            u = subprocess.run(["/bin/bash", os.path.join(rt, "uninstall.sh"), "--purge", "--yes"], env=env,
+                               capture_output=True, text=True, timeout=60)
+            self.assertEqual(u.returncode, 0, u.stderr)
+            self.assertIn("it is a git checkout", u.stdout)
+            self.assertTrue(os.path.isdir(os.path.join(rt, ".git")))                        # kept
+            self.assertFalse(os.path.exists(os.path.join(home, ".chronos")))                # the data still went
+
+    def test_purge_keeps_a_git_worktree_where_the_copy_goes(self):
+        """R2-2: a git worktree (or a submodule) has a .git FILE, not a folder: --purge must keep it too."""
+        with tempfile.TemporaryDirectory() as home:
+            main = os.path.join(home, "chronos-main")
+            c = subprocess.run(["git", "clone", "-q", "--local", "--no-hardlinks", ROOT, main], capture_output=True, text=True,
+                               timeout=120)
+            self.assertEqual(c.returncode, 0, c.stderr)
+            rt = os.path.join(home, ".local", "share", "chronos")
+            os.makedirs(os.path.dirname(rt))
+            w = subprocess.run(["git", "-C", main, "worktree", "add", "-q", "--detach", rt], capture_output=True, text=True,
+                               timeout=120)
+            self.assertEqual(w.returncode, 0, w.stderr)
+            self.assertTrue(os.path.isfile(os.path.join(rt, ".git")))                       # a worktree's .git is a file
+            env = dict(os.environ, HOME=home, CHRONOS_CONFIG=os.path.join(home, ".config", "chronos", "config.json"))
+            u = subprocess.run(["/bin/bash", os.path.join(ROOT, "uninstall.sh"), "--purge", "--yes"], env=env,
+                               capture_output=True, text=True, timeout=60)
+            self.assertEqual(u.returncode, 0, u.stderr)
+            self.assertIn("it is a git checkout", u.stdout)
+            self.assertTrue(os.path.isfile(os.path.join(rt, ".git")))                       # kept
+
+    def test_help_shows_the_whole_header(self):
+        """R1-5: the header grew; --help still ends with the Environment line, on any system."""
+        h = subprocess.run(["/bin/bash", INSTALL, "--help"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(h.returncode, 0)
+        self.assertIn("# Environment: CHRONOS_CONFIG", h.stdout)
+
+
 class Installer(unittest.TestCase):
     """install.sh into a throwaway HOME with --no-load: nothing may reach the real LaunchAgents folder or launchctl."""
 
