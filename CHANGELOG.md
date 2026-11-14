@@ -1,5 +1,14 @@
 # Changelog
 
+## Next release
+
+- `install.sh` runs on Linux. It copies the runtime to `~/.local/share/chronos` (or runs a checkout that is already there in
+  place), makes the config, jobs and UI token as on a Mac, and loads nothing: jobs that run in a client's session work, jobs that
+  run by themselves in the background need a timer Chronos does not install on Linux yet. It takes `python3` from PATH there,
+  and says that `--no-copy` and `--no-load` do nothing on Linux.
+- `uninstall.sh` skips `launchctl` off a Mac, and `--purge` keeps a `~/.local/share/chronos` that is a git checkout.
+- `install.sh --help` shows the whole header again, and the missing-`claude` warning goes to stderr (so `--quiet` is one line).
+
 ## 0.5.1 (2026-11-10)
 
 **Security and correctness audit, 2026-11-10** ([docs/audits/2026-11-10-security.md](docs/audits/2026-11-10-security.md)). Fixes only; `api` stays 1.

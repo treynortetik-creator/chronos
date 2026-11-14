@@ -1,5 +1,5 @@
 #!/bin/bash
-# Chronos uninstaller. Unloads and removes the two launchd agents. Leaves your data alone unless --purge.
+# Chronos uninstaller. Unloads and removes the two launchd agents (a Mac's; Linux has none). Leaves your data alone unless --purge.
 #   ./uninstall.sh [--purge] [--yes]
 #   --purge  also delete ~/.chronos (state, logs, history, UI token), ~/.config/chronos (config, jobs)
 #            and the copied runtime in ~/.local/share/chronos. Asks first unless --yes.
@@ -11,6 +11,8 @@ for a in "$@"; do
 done
 AGENTS="${CHRONOS_LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
 UIDN="$(id -u)"
+# Linux has no launchd: nothing was loaded there, and no plist was written (install.sh's Linux branch)
+[ "$(uname -s)" = Darwin ] || CHRONOS_NO_LAUNCHCTL=1
 for label in io.github.chronos.tick io.github.chronos.ui; do
   if [ -z "${CHRONOS_NO_LAUNCHCTL:-}" ]; then launchctl bootout "gui/$UIDN/$label" 2>/dev/null && echo "unloaded $label"; fi
   [ -f "$AGENTS/$label.plist" ] && rm -f "$AGENTS/$label.plist" && echo "removed $AGENTS/$label.plist"
@@ -24,7 +26,11 @@ if [ "$PURGE" = 1 ]; then
   else TARGETS=("$HOME/.chronos" "$HOME/.local/share/chronos"); echo "note: $CONFIG_DIR is not a chronos folder, so it is kept; delete your config and jobs there by hand."; fi
   echo "--purge will delete: ${TARGETS[*]}"
   if [ "$YES" != 1 ]; then read -r -p "Type 'purge' to continue: " ans; [ "$ans" = purge ] || { echo "aborted; data kept."; exit 1; }; fi
-  for t in "${TARGETS[@]}"; do rm -rf "$t"; done
+  for t in "${TARGETS[@]}"; do
+    # a git checkout is someone's clone (Chronos cloned straight into ~/.local/share/chronos), not a copy install.sh made: keep it
+    if [ -e "$t/.git" ]; then echo "kept $t: it is a git checkout, not a copy install.sh made; delete it by hand if you mean to."; continue; fi
+    rm -rf "$t"
+  done
   echo "purged."
 else
   echo "Data kept (~/.chronos, ~/.config/chronos). Use --purge to delete it."
