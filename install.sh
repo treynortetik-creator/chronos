@@ -146,6 +146,32 @@ if [ "$MACOS" = 0 ]; then
   SYSTEMCTL=systemctl; LOGINCTL=loginctl
   if [ "${CHRONOS_TEST_MODE:-}" = 1 ]; then SYSTEMCTL="${CHRONOS_SYSTEMCTL:-systemctl}"; LOGINCTL="${CHRONOS_LOGINCTL:-loginctl}"; fi
   mkdir -p "$UNITS"
+  # The tick and its runs set a fixed PATH (bin/chronos-tick.sh), not the installer's. A claude installed through nvm or an npm
+  # prefix is found here and nowhere there, so its folder (which holds `node` too, for nvm) goes into the config's "path", which
+  # every run puts first. Nothing else in the config changes.
+  TICK_PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  on_tick_path() { case ":$TICK_PATH:" in *":$1:"*) return 0 ;; *) return 1 ;; esac; }
+  CLAUDE_FOUND="$(command -v claude 2>/dev/null || true)"
+  if [ -n "$CLAUDE_FOUND" ]; then
+    CLAUDE_DIR="$(dirname "$CLAUDE_FOUND")"
+    if ! on_tick_path "$CLAUDE_DIR"; then
+      CFGF="$CONFIG" ADD="$CLAUDE_DIR" "$PY" - <<'PYEOF'
+import json, os
+p = os.environ["CFGF"]
+c = json.load(open(p))
+path = c.get("path") or []
+if os.environ["ADD"] not in [os.path.expanduser(str(x)) for x in path]:
+    c["path"] = path + [os.environ["ADD"]]
+    tmp = p + ".tmp"
+    json.dump(c, open(tmp, "w"), indent=2); open(tmp, "a").write("\n")
+    os.chmod(tmp, 0o600); os.replace(tmp, p)
+PYEOF
+      say "added $CLAUDE_DIR to the config's \"path\": background runs find claude there"
+    fi
+  else
+    echo "warning: 'claude' is not on PATH here, so background runs won't find it either. Install Claude Code, or set claude_bin (or \"path\") in $CONFIG." >&2
+  fi
+  on_tick_path "$(dirname "$PY")" || echo "warning: the tick runs the python3 on its own PATH ($TICK_PATH), not $PY; make sure one is there." >&2
   urender() { # template -> destination (a path with a newline or a quote would break the unit file: refused)
     case "$INSTALL_DIR$HOME_DIR$CONFIG" in *$'\n'*|*'"'*|*'%'*) echo "a path has a newline, a quote or a %, which a systemd unit cannot hold: $1" >&2; exit 1 ;; esac
     sed -e "s|__INSTALL_DIR__|$INSTALL_DIR|g" -e "s|__HOME_DIR__|$HOME_DIR|g" -e "s|__CONFIG__|$CONFIG|g" "$1" > "$2"

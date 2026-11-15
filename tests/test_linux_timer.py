@@ -1,6 +1,7 @@
 """Linux: install.sh writes a systemd USER timer for the tick (launchd's job on a Mac) and enables it; uninstall.sh stops and
 removes it. systemctl and loginctl are stand-ins that log their arguments (CHRONOS_SYSTEMCTL / CHRONOS_LOGINCTL, with
 CHRONOS_TEST_MODE=1). Skipped on a Mac, where the launchd path is tested in test_chronos.py."""
+import json
 import os
 import shutil
 import subprocess
@@ -100,6 +101,33 @@ class LinuxTimer(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.units, "chronos-tick.timer")))
         self.assertFalse(os.path.exists(os.path.join(self.units, "chronos-tick.service")))
         self.assertTrue(os.path.isdir(os.path.join(self.home, ".chronos")))
+
+    def test_a_claude_outside_the_ticks_path_has_its_folder_put_in_the_config(self):
+        # nvm or an npm prefix: claude (and node beside it) live where the tick's fixed PATH never looks
+        nvm = os.path.join(self.home, "nvm", "bin")
+        os.makedirs(nvm)
+        with open(os.path.join(nvm, "claude"), "w") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        os.chmod(os.path.join(nvm, "claude"), 0o755)
+        self.env["PATH"] = nvm + ":/usr/bin:/bin"
+        r = self.install()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(os.path.join(self.home, ".config", "chronos", "config.json")) as fh:
+            cfg = json.load(fh)
+        self.assertIn(nvm, cfg["path"])
+        self.assertIn("background runs find claude there", r.stdout)
+        # again: not added twice
+        self.assertEqual(self.install().returncode, 0)
+        with open(os.path.join(self.home, ".config", "chronos", "config.json")) as fh:
+            self.assertEqual(json.load(fh)["path"].count(nvm), 1)
+
+    def test_no_claude_anywhere_is_a_warning_that_background_runs_will_not_find_it(self):
+        self.env["PATH"] = "/usr/bin:/bin"
+        if shutil.which("claude", path=self.env["PATH"]):
+            self.skipTest("a claude is installed in /usr/bin or /bin here")
+        r = self.install()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("background runs won't find it either", r.stderr)
 
     def test_a_stray_stand_in_without_test_mode_is_not_used(self):
         env = dict(self.env)
