@@ -1,0 +1,13 @@
+# Chronos tick on Linux. Rendered by install.sh into ~/.config/systemd/user/. The timer starts it every 5 minutes; the tick
+# decides what is due and starts each run in the background. KillMode=process is launchd's AbandonProcessGroup: when the tick
+# exits, systemd stops only the tick, never the runs it started (the default would kill them with it).
+[Unit]
+Description=Chronos tick (starts the jobs that are due)
+
+[Service]
+Type=oneshot
+Environment="CHRONOS_CONFIG=__CONFIG__"
+ExecStart=/bin/bash "__INSTALL_DIR__/bin/chronos-tick.sh"
+KillMode=process
+StandardOutput=append:__HOME_DIR__/logs/systemd.out
+StandardError=append:__HOME_DIR__/logs/systemd.err

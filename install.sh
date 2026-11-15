@@ -1,5 +1,5 @@
 #!/bin/bash
-# Chronos installer (macOS; Linux without a background timer yet).
+# Chronos installer (macOS with launchd; Linux with a systemd user timer).
 #
 #   ./install.sh [--workspace DIR] [--port N] [--no-ui] [--no-load] [--copy | --no-copy] [--with-examples] [--force-config] [--quiet]
 #
@@ -10,7 +10,7 @@
 #   --workspace DIR   directory headless jobs run in (default ~/chronos-workspace, created if missing)
 #   --port N          web UI port (default 4747)
 #   --no-ui           install the scheduler only
-#   --no-load         write everything but do not touch launchctl (useful for review)
+#   --no-load         write everything but do not touch launchctl or systemctl (useful for review)
 #   --copy            copy the runtime to ~/.local/share/chronos and run from there. This is the DEFAULT
 #                     when this checkout lives under ~/Desktop, ~/Documents or ~/Downloads, because
 #                     macOS privacy (TCC) can stop launchd jobs reading those folders. --no-copy overrides.
@@ -20,10 +20,14 @@
 #                     (Talos does); it adds its own next steps.
 #
 # On Linux there is no launchd: the runtime is copied to ~/.local/share/chronos, the config, jobs and UI token are made as on a
-# Mac, and nothing is loaded. Jobs that run in a Talos thread work (Talos asks Chronos what is due every minute); jobs that run by
-# themselves in the background need a timer that Chronos does not install on Linux yet, so they do not run there.
+# Mac, and the tick runs from a systemd USER timer every 5 minutes (chronos-tick.timer + chronos-tick.service in
+# ~/.config/systemd/user, enabled with `systemctl --user enable --now`), so jobs that run by themselves in the background work
+# as on a Mac. With no user systemd (a container, WSL without systemd) the units are written, nothing is started, and the
+# installer says so and how to run the tick by hand. A user timer runs while you are logged in; for a computer nobody logs in
+# to, `loginctl enable-linger` keeps it running (the installer tells you when linger is off).
 #
-# Environment: CHRONOS_CONFIG (config path), CHRONOS_LAUNCHAGENTS_DIR (plist folder, for tests).
+# Environment: CHRONOS_CONFIG (config path), CHRONOS_LAUNCHAGENTS_DIR (plist folder, for tests), CHRONOS_SYSTEMD_DIR (unit
+# folder, for tests), CHRONOS_SYSTEMCTL and CHRONOS_LOGINCTL (stand-ins, with CHRONOS_TEST_MODE=1 only).
 set -eu
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
@@ -39,7 +43,7 @@ while [ $# -gt 0 ]; do
     --with-examples) EXAMPLES=1; shift ;;
     --force-config) FORCE=1; shift ;;
     --quiet) QUIET=1; shift ;;
-    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
+    -h|--help) awk 'NR > 1 && /^#/ { print; next } NR > 1 { exit }' "$0"; exit 0 ;;   # the whole header, however long it grows
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -49,7 +53,7 @@ say() { [ "$QUIET" = 1 ] || printf '%s\n' "$*"; }     # informational output; --
 case "$(uname -s)" in
   Darwin) MACOS=1 ;;
   Linux) MACOS=0 ;;
-  *) echo "Chronos runs on macOS, and on Linux without a background timer yet." >&2; exit 1 ;;
+  *) echo "Chronos runs on macOS and on Linux." >&2; exit 1 ;;
 esac
 case "$PORT" in ''|*[!0-9]*) echo "--port must be a number" >&2; exit 2 ;; esac
 
@@ -69,7 +73,6 @@ case "$SRC" in "$HOME/Desktop"/*|"$HOME/Documents"/*|"$HOME/Downloads"/*) PROTEC
 # Read before `auto` is resolved below, so only a --no-copy the person really passed is answered.
 if [ "$MACOS" = 0 ]; then
   [ "$COPY" = no ] && echo "note: --no-copy does nothing on Linux: the runtime always runs from ~/.local/share/chronos." >&2
-  [ "$LOAD" = 0 ] && echo "note: --no-load does nothing on Linux: nothing is loaded there anyway." >&2
   COPY=yes
 fi
 if [ "$COPY" = auto ]; then COPY=no; [ "$PROTECTED" = 1 ] && COPY=yes; fi
@@ -84,7 +87,7 @@ if [ "$COPY" = yes ]; then
   INSTALL_DIR="$HOME/.local/share/chronos"
   [ "$PROTECTED" = 1 ] && [ "$MACOS" = 1 ] && say "note: this checkout is in a macOS-protected folder, so the runtime is copied to $INSTALL_DIR (see README, TCC)."
   mkdir -p "$INSTALL_DIR"
-  for d in bin lib ui hooks examples; do rm -rf "$INSTALL_DIR/$d"; cp -R "$SRC/$d" "$INSTALL_DIR/$d"; done
+  for d in bin lib ui hooks examples systemd; do rm -rf "$INSTALL_DIR/$d"; cp -R "$SRC/$d" "$INSTALL_DIR/$d"; done
   find "$INSTALL_DIR" -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
   say "re-run ./install.sh after you pull updates to refresh the copy."
 fi
@@ -135,20 +138,75 @@ if [ ! -s "$TOKEN_FILE" ]; then
   say "generated $TOKEN_FILE"
 fi
 
-# ---- Linux: no launchd, so nothing to render or load (the background timer is not on Linux yet)
+# ---- Linux: a systemd user timer runs the tick (launchd's job on a Mac)
 if [ "$MACOS" = 0 ]; then
   CHVER="$("$PY" "$INSTALL_DIR/bin/chronos" --version 2>/dev/null || echo chronos)"
-  LINE="Jobs that run in a Talos thread work now. Jobs that run by themselves in the background need a timer that isn't on Linux yet."
+  UNITS="${CHRONOS_SYSTEMD_DIR:-$HOME/.config/systemd/user}"
+  # a stand-in systemctl/loginctl only with CHRONOS_TEST_MODE=1 (as CHRONOS_LAUNCHCTL), so a stray variable never redirects them
+  SYSTEMCTL=systemctl; LOGINCTL=loginctl
+  if [ "${CHRONOS_TEST_MODE:-}" = 1 ]; then SYSTEMCTL="${CHRONOS_SYSTEMCTL:-systemctl}"; LOGINCTL="${CHRONOS_LOGINCTL:-loginctl}"; fi
+  mkdir -p "$UNITS"
+  # The tick and its runs set a fixed PATH (bin/chronos-tick.sh), not the installer's. A claude installed through nvm or an npm
+  # prefix is found here and nowhere there, so its folder (which holds `node` too, for nvm) goes into the config's "path", which
+  # every run puts first. Nothing else in the config changes.
+  TICK_PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  on_tick_path() { case ":$TICK_PATH:" in *":$1:"*) return 0 ;; *) return 1 ;; esac; }
+  CLAUDE_FOUND="$(command -v claude 2>/dev/null || true)"
+  if [ -n "$CLAUDE_FOUND" ]; then
+    CLAUDE_DIR="$(dirname "$CLAUDE_FOUND")"
+    if ! on_tick_path "$CLAUDE_DIR"; then
+      CFGF="$CONFIG" ADD="$CLAUDE_DIR" "$PY" - <<'PYEOF'
+import json, os
+p = os.environ["CFGF"]
+c = json.load(open(p))
+path = c.get("path") or []
+if os.environ["ADD"] not in [os.path.expanduser(str(x)) for x in path]:
+    c["path"] = path + [os.environ["ADD"]]
+    tmp = p + ".tmp"
+    json.dump(c, open(tmp, "w"), indent=2); open(tmp, "a").write("\n")
+    os.chmod(tmp, 0o600); os.replace(tmp, p)
+PYEOF
+      say "added $CLAUDE_DIR to the config's \"path\": background runs find claude there"
+    fi
+  else
+    echo "warning: 'claude' is not on PATH here, so background runs won't find it either. Install Claude Code, or set claude_bin (or \"path\") in $CONFIG." >&2
+  fi
+  on_tick_path "$(dirname "$PY")" || echo "warning: the tick runs the python3 on its own PATH ($TICK_PATH), not $PY; make sure one is there." >&2
+  urender() { # template -> destination (a path with a newline or a quote would break the unit file: refused)
+    case "$INSTALL_DIR$HOME_DIR$CONFIG" in *$'\n'*|*'"'*|*'%'*) echo "a path has a newline, a quote or a %, which a systemd unit cannot hold: $1" >&2; exit 1 ;; esac
+    sed -e "s|__INSTALL_DIR__|$INSTALL_DIR|g" -e "s|__HOME_DIR__|$HOME_DIR|g" -e "s|__CONFIG__|$CONFIG|g" "$1" > "$2"
+  }
+  urender "$INSTALL_DIR/systemd/chronos-tick.service.tmpl" "$UNITS/chronos-tick.service"
+  urender "$INSTALL_DIR/systemd/chronos-tick.timer.tmpl" "$UNITS/chronos-tick.timer"
+  say "wrote $UNITS/chronos-tick.service and chronos-tick.timer"
+  TIMER="off"
+  if [ "$LOAD" = 0 ]; then
+    TIMER="written, not started (--no-load)"
+  elif "$SYSTEMCTL" --user daemon-reload >/dev/null 2>&1 && "$SYSTEMCTL" --user enable --now chronos-tick.timer >/dev/null 2>&1; then
+    TIMER="on"
+  else
+    TIMER="not started: no systemd user session here"
+  fi
+  LINGER=""
+  if [ "$TIMER" = on ] && [ "$("$LOGINCTL" show-user "$(id -un)" -p Linger --value 2>/dev/null)" != yes ]; then
+    LINGER="It runs while you are logged in; for a computer nobody logs in to: loginctl enable-linger $(id -un)"
+  fi
+  case "$TIMER" in
+    on) LINE="The background timer is on (every 5 minutes): jobs run by themselves, and jobs in a Talos thread work too." ;;
+    *) LINE="The background timer is $TIMER, so only jobs that run in a Talos thread run. Run the tick by hand: bash $INSTALL_DIR/bin/chronos-tick.sh" ;;
+  esac
   if [ "$QUIET" = 1 ]; then
-    echo "$CHVER installed on Linux: $LINE Config $CONFIG"
+    echo "$CHVER installed on Linux: $LINE${LINGER:+ $LINGER.} Config $CONFIG"
     exit 0
   fi
   echo
   echo "Chronos is installed (Linux)."
   echo "  $LINE"
+  [ -n "$LINGER" ] && echo "  $LINGER"
   echo "  Config:     $CONFIG"
   echo "  Jobs:       $JOBS_FILE  (prompts in $JOBS_DIR/<id>/prompt.md)"
   echo "  Runtime:    $INSTALL_DIR  (re-run ./install.sh after you pull updates)"
+  echo "  Timer:      $UNITS/chronos-tick.timer  (systemctl --user status chronos-tick.timer)"
   [ "$UI" = 1 ] && echo "  UI:         not started as a service on Linux; run it by hand: CHRONOS_CONFIG=$CONFIG python3 $INSTALL_DIR/ui/server.py   (then open http://127.0.0.1:$PORT/)"
   echo "  Next:       $INSTALL_DIR/bin/chronos list"
   exit 0

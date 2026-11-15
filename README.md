@@ -131,9 +131,10 @@ real runs: `python3 tools/demo.py /tmp/chronos-demo`, then follow the two lines 
 
 ## Requirements
 
-- macOS (launchd), or Linux without the background timer: `./install.sh` runs on Linux, and jobs that run in a client's session
-  (the client asks Chronos what is due) work there; jobs that run by themselves in the background need a timer Chronos does not
-  install on Linux yet. Windows is not supported.
+- macOS (launchd), or Linux with systemd: on Linux `./install.sh` runs the tick from a systemd user timer every 5 minutes, so
+  jobs that run by themselves in the background work as on a Mac. Without a systemd user session only jobs that run in a client's
+  session run, and the installer says so. A user timer runs while you are logged in; `loginctl enable-linger` keeps it running
+  with nobody logged in. Windows is not supported (inside WSL with systemd it is Linux).
 - The [Claude Code CLI](https://claude.com/claude-code) installed and **already logged in**
   (run `claude` once by hand). Headless runs use that login and count against your usage.
 - Python 3.9+ (the system `/usr/bin/python3` is enough) and `/bin/bash`.
@@ -709,8 +710,9 @@ real `claude`: the CLI is replaced by `tests/fake-claude.sh`.
 
 ## Limitations
 
-- The background tick is macOS only (launchd). On Linux, install.sh installs Chronos without it, so background (headless) jobs
-  do not run there yet; a systemd timer would add it. The scripts use `/bin/bash` 3.2-compatible syntax.
+- The background tick is launchd on a Mac and a systemd user timer on Linux. Where there is no systemd user session, install.sh
+  writes the timer and starts nothing, so background (headless) jobs and command jobs don't start there. A user timer stops when
+  you log out unless linger is on (`loginctl enable-linger`). The scripts use `/bin/bash` 3.2-compatible syntax.
 - Needs a logged-in Claude Code CLI. Chronos does not manage authentication.
 - The tick runs every 5 minutes, so jobs start up to 5 minutes (plus the grace period) after their time.
 - A sleeping laptop runs nothing; catch-up windows cover the gap after wake, not a day-long absence.
