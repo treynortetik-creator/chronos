@@ -1,9 +1,10 @@
 #!/bin/bash
-# Chronos uninstaller. Unloads and removes the two launchd agents (a Mac's; Linux has none). Leaves your data alone unless --purge.
+# Chronos uninstaller. Unloads and removes the two launchd agents on a Mac, or stops and removes the systemd user timer on Linux.
+# Leaves your data alone unless --purge.
 #   ./uninstall.sh [--purge] [--yes]
 #   --purge  also delete ~/.chronos (state, logs, history, UI token), ~/.config/chronos (config, jobs)
 #            and the copied runtime in ~/.local/share/chronos. Asks first unless --yes.
-# Only touches the labels io.github.chronos.tick and io.github.chronos.ui.
+# Only touches the labels io.github.chronos.tick and io.github.chronos.ui, and the units chronos-tick.timer and .service.
 set -u
 PURGE=0; YES=0
 for a in "$@"; do
@@ -11,8 +12,18 @@ for a in "$@"; do
 done
 AGENTS="${CHRONOS_LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
 UIDN="$(id -u)"
-# Linux has no launchd: nothing was loaded there, and no plist was written (install.sh's Linux branch)
-[ "$(uname -s)" = Darwin ] || CHRONOS_NO_LAUNCHCTL=1
+# Linux has no launchd: nothing was loaded there, and no plist was written (install.sh's Linux branch). Its systemd user timer goes.
+if [ "$(uname -s)" != Darwin ]; then
+  CHRONOS_NO_LAUNCHCTL=1
+  UNITS="${CHRONOS_SYSTEMD_DIR:-$HOME/.config/systemd/user}"
+  SYSTEMCTL=systemctl
+  [ "${CHRONOS_TEST_MODE:-}" = 1 ] && SYSTEMCTL="${CHRONOS_SYSTEMCTL:-systemctl}"
+  if [ -f "$UNITS/chronos-tick.timer" ] || [ -f "$UNITS/chronos-tick.service" ]; then
+    "$SYSTEMCTL" --user disable --now chronos-tick.timer >/dev/null 2>&1 && echo "stopped chronos-tick.timer"
+    rm -f "$UNITS/chronos-tick.timer" "$UNITS/chronos-tick.service" && echo "removed the chronos-tick units from $UNITS"
+    "$SYSTEMCTL" --user daemon-reload >/dev/null 2>&1 || true
+  fi
+fi
 for label in io.github.chronos.tick io.github.chronos.ui; do
   if [ -z "${CHRONOS_NO_LAUNCHCTL:-}" ]; then launchctl bootout "gui/$UIDN/$label" 2>/dev/null && echo "unloaded $label"; fi
   [ -f "$AGENTS/$label.plist" ] && rm -f "$AGENTS/$label.plist" && echo "removed $AGENTS/$label.plist"

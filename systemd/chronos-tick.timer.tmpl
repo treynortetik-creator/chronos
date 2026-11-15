@@ -1,0 +1,12 @@
+# Chronos tick on Linux, every 5 minutes (what launchd's StartInterval 300 does on a Mac). Persistent: a tick missed while the
+# computer slept runs at wake; the tick itself catches up each job inside its own window, as on a Mac.
+[Unit]
+Description=Chronos tick every 5 minutes
+
+[Timer]
+OnCalendar=*:0/5
+Persistent=true
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

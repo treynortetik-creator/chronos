@@ -1896,6 +1896,9 @@ def macos_shims(env, home):
 
 # the Linux branch of install.sh (a name, not an inline decorator call, which the PR hygiene scan would read as an address)
 LINUX_ONLY = unittest.skipIf(sys.platform == "darwin", "the Linux branch of install.sh")
+# these installs never reach the computer's real systemd: systemctl is /bin/false (no user session), so the timer is written and
+# not started (test_linux_timer.py covers a systemctl that answers)
+NO_USER_SYSTEMD = {"CHRONOS_TEST_MODE": "1", "CHRONOS_SYSTEMCTL": "/bin/false", "CHRONOS_LOGINCTL": "/bin/false"}
 
 
 @LINUX_ONLY
@@ -1904,14 +1907,14 @@ class InstallerLinux(unittest.TestCase):
     Mac, one plain line about what works, and uninstall.sh --purge removes it without reaching for launchctl."""
 
     def run_install(self, home, *args):
-        env = dict(os.environ, HOME=home, CHRONOS_CONFIG=os.path.join(home, ".config", "chronos", "config.json"))
+        env = dict(os.environ, HOME=home, CHRONOS_CONFIG=os.path.join(home, ".config", "chronos", "config.json"), **NO_USER_SYSTEMD)
         env.pop("CHRONOS_LAUNCHAGENTS_DIR", None)
         return subprocess.run(["/bin/bash", INSTALL, "--workspace", os.path.join(home, "ws"), *args], env=env,
                               capture_output=True, text=True, timeout=120), env
 
     def test_install_on_linux_says_what_works_and_loads_nothing(self):
-        line = ("Jobs that run in a Talos thread work now. Jobs that run by themselves in the background need a timer that "
-                "isn't on Linux yet.")
+        line = ("The background timer is not started: no systemd user session here, so only jobs that run in a Talos thread "
+                "run.")
         with tempfile.TemporaryDirectory() as home:
             r, env = self.run_install(home)
             self.assertEqual(r.returncode, 0, r.stderr)
@@ -1922,7 +1925,7 @@ class InstallerLinux(unittest.TestCase):
             n, _ = self.run_install(home, "--no-copy", "--no-load")
             self.assertEqual(n.returncode, 0, n.stderr)
             self.assertIn("--no-copy does nothing on Linux", n.stderr)
-            self.assertIn("--no-load does nothing on Linux", n.stderr)
+            self.assertIn("not started (--no-load)", n.stdout)
             rt = os.path.join(home, ".local", "share", "chronos")
             self.assertTrue(os.access(os.path.join(rt, "bin", "chronos"), os.X_OK))   # where Talos finds it
             self.assertFalse(os.path.exists(os.path.join(home, "Library")))              # no LaunchAgents folder
@@ -1954,7 +1957,8 @@ class InstallerLinux(unittest.TestCase):
             self.assertEqual(c.returncode, 0, c.stderr)
             for f in ("install.sh", "uninstall.sh", "tests/test_chronos.py"):              # this tree's scripts, not HEAD's
                 shutil.copy(os.path.join(ROOT, f), os.path.join(rt, f))
-            env = dict(os.environ, HOME=home, CHRONOS_CONFIG=os.path.join(home, ".config", "chronos", "config.json"))
+            env = dict(os.environ, HOME=home, CHRONOS_CONFIG=os.path.join(home, ".config", "chronos", "config.json"),
+                       **NO_USER_SYSTEMD)
             env.pop("CHRONOS_LAUNCHAGENTS_DIR", None)
             r = subprocess.run(["/bin/bash", os.path.join(rt, "install.sh"), "--workspace", os.path.join(home, "ws")], env=env,
                                capture_output=True, text=True, timeout=120)
@@ -2115,7 +2119,9 @@ class RestrictedClockRuns(unittest.TestCase):
             self.e.cleanup()
 
     def start(self, jobs=None, **cfg):
-        self.e = Env(jobs or [job("rj", restricted=True)], claude_args=["--dangerously-skip-permissions", "--add-dir", "/"], **cfg)
+        # every day, not the helper's weekdays: run on a Saturday or Sunday, a weekdays job is never due and every test here failed
+        jobs = [dict(j, days="daily") for j in (jobs or [job("rj", restricted=True)])]
+        self.e = Env(jobs, claude_args=["--dangerously-skip-permissions", "--add-dir", "/"], **cfg)
         self.st = self.e.cfg["state_dir"]
         return self.e
 

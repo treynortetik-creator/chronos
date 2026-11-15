@@ -2,6 +2,15 @@
 
 ## Next release
 
+- **Linux gets the background timer.** `install.sh` on Linux writes a systemd user timer, `chronos-tick.timer` with
+  `chronos-tick.service` in `~/.config/systemd/user`, and enables it with `systemctl --user enable --now`. It runs the tick every
+  5 minutes, as launchd does on a Mac, with `Persistent=true` so a tick missed while the computer slept runs at wake. So jobs
+  that run by themselves in the background, and command jobs, now run on Linux. The service sets `KillMode=process`, launchd's
+  `AbandonProcessGroup`, so the runs a tick starts outlive it. With no systemd user session (a container, WSL without systemd)
+  the units are written, nothing is started, and the installer says so and how to run the tick by hand. When linger is off it
+  says how to keep the timer running with nobody logged in (`loginctl enable-linger`). `--no-load` writes the units and starts
+  nothing. `uninstall.sh` stops and removes them.
+- Tests: the restricted clock-run tests no longer fail on a Saturday or Sunday (their jobs ran on weekdays only).
 - `install.sh` runs on Linux. It copies the runtime to `~/.local/share/chronos` (or runs a checkout that is already there in
   place), makes the config, jobs and UI token as on a Mac, and loads nothing: jobs that run in a client's session work, jobs that
   run by themselves in the background need a timer Chronos does not install on Linux yet. It takes `python3` from PATH there,
